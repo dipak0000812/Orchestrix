@@ -1,0 +1,9 @@
+server:
+  port: 8080
+
+logging:
+  level: info
+  format: json
+
+shutdown:
+  timeout: 30s
