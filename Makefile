@@ -1,57 +1,36 @@
-.PHONY: help build run test clean
+.PHONY: help migrate-up migrate-down migrate-create db-reset
 
-# Default target
+# Database connection
+DB_URL := postgres://orchestrix:orchestrix_dev_password@localhost:5434/orchestrix_dev?sslmode=disable
+
 help:
-	@echo "Job Orchestrator - Available targets:"
-	@echo "  make build    - Build the application"
-	@echo "  make run      - Run the application"
-	@echo "  make test     - Run tests"
-	@echo "  make clean    - Clean build artifacts"
-	@echo "  make migrate  - Run database migrations"
+	@echo "Available commands:"
+	@echo "  make migrate-up       - Apply all pending migrations"
+	@echo "  make migrate-down     - Rollback last migration"
+	@echo "  make migrate-create   - Create new migration (usage: make migrate-create name=add_priority)"
+	@echo "  make db-reset         - Drop and recreate database (⚠️  destroys data)"
 
-# Build binary
-build:
-	@echo "Building..."
-	go build -o bin/server cmd/server/main.go
+migrate-up:
+	migrate -path migrations -database "$(DB_URL)" up
 
-# Run application
-run:
-	@echo "Running..."
-	go run cmd/server/main.go
+migrate-down:
+	migrate -path migrations -database "$(DB_URL)" down 1
 
-# Run tests
-test:
-	@echo "Running tests..."
-	go test -v ./...
+migrate-create:
+	@if [ -z "$(name)" ]; then \
+		echo "Error: name is required. Usage: make migrate-create name=add_priority"; \
+		exit 1; \
+	fi
+	migrate create -ext sql -dir migrations -seq $(name)
 
-# Run tests with coverage
-test-coverage:
-	@echo "Running tests with coverage..."
-	go test -v -coverprofile=coverage.out ./...
-	go tool cover -html=coverage.out -o coverage.html
-
-# Clean build artifacts
-clean:
-	@echo "Cleaning..."
-	rm -rf bin/
-	rm -f coverage.out coverage.html
-
-# Database migrations (placeholder)
-migrate:
-	@echo "Migrations not yet implemented"
-
-# Format code
-fmt:
-	@echo "Formatting code..."
-	go fmt ./...
-
-# Run linter
-lint:
-	@echo "Running linter..."
-	golangci-lint run
-
-# Install dependencies
-deps:
-	@echo "Installing dependencies..."
-	go mod download
-	go mod tidy
+db-reset:
+	@echo "⚠️  WARNING: This will delete ALL data!"
+	@read -p "Are you sure? [y/N] " -n 1 -r; \
+	echo; \
+	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
+		migrate -path migrations -database "$(DB_URL)" down -all; \
+		migrate -path migrations -database "$(DB_URL)" up; \
+		echo "✓ Database reset complete"; \
+	else \
+		echo "Cancelled"; \
+	fi

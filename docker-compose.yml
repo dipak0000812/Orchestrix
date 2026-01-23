@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: orchestrix-postgres
+    restart: unless-stopped
+    
+    environment:
+      POSTGRES_USER: orchestrix
+      POSTGRES_PASSWORD: orchestrix_dev_password
+      POSTGRES_DB: orchestrix_dev
+    
+    ports:
+      - "5434:5432"
+    
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orchestrix -d orchestrix_dev"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+    driver: local

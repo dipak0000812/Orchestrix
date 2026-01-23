@@ -48,3 +48,6 @@ temp/
 coverage.txt
 coverage.html
 *.cover
+
+# Environment variables (secrets)
+.env
