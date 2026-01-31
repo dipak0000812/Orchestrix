@@ -18,6 +18,7 @@ import (
 	"github.com/dipak0000812/orchestrix/internal/job/state"
 	"github.com/dipak0000812/orchestrix/internal/scheduler"
 	"github.com/dipak0000812/orchestrix/internal/worker"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -81,7 +82,9 @@ func main() {
 	defer workers.Stop()
 
 	// 7. Create HTTP handler and router
-	handler := api.NewHandler(jobService)
+	// 7. Create metrics and HTTP handler
+	metrics := api.NewMetrics()
+	handler := api.NewHandler(jobService, metrics) // ← Pass metrics
 
 	router := http.NewServeMux()
 	router.HandleFunc("POST /api/v1/jobs", handler.CreateJob)
@@ -89,6 +92,7 @@ func main() {
 	router.HandleFunc("GET /api/v1/jobs", handler.ListJobs)
 	router.HandleFunc("DELETE /api/v1/jobs/{id}", handler.CancelJob)
 	router.HandleFunc("GET /health", handler.Health)
+	router.Handle("GET /metrics", promhttp.Handler()) // ← Add this
 
 	// 8. Create HTTP server
 	server := &http.Server{

@@ -1,206 +1,236 @@
-# Orchestrix
+# Orchestrix 🎯
 
-Orchestrix is a backend job orchestration service built in Go that manages asynchronous task execution with explicit lifecycle control, retries, and observability.
+A production-grade job orchestration engine built in Go.
 
-The system is designed as a **single-binary monolith** with strong internal boundaries, prioritizing correctness, debuggability, and operational clarity over premature distribution.
+## Features
 
----
+- ✅ **Job Lifecycle Management** - Complete state machine (PENDING → SCHEDULED → RUNNING → SUCCEEDED/FAILED)
+- ✅ **Automatic Retry** - Exponential backoff with configurable max attempts
+- ✅ **Concurrent Execution** - Worker pool with configurable workers
+- ✅ **REST API** - HTTP endpoints for job management
+- ✅ **Persistent Storage** - PostgreSQL with migrations
+- ✅ **Metrics** - Prometheus metrics for monitoring
+- ✅ **Graceful Shutdown** - Zero job loss on deployment
+- ✅ **Docker Support** - Fully containerized
 
-## Project Status
+## Quick Start
 
-🚧 **Under Active Development**
+### Prerequisites
 
-**Current Phase:** Foundation  
-The core runtime shell, configuration system, and architectural groundwork are complete.  
-Domain logic and execution engine are under active development.
+- Docker & Docker Compose
+- Go 1.22+ (for local development)
 
----
+### Run with Docker (Easiest)
+```bash
+# Clone repository
+git clone https://github.com/dipak0000812/Orchestrix.git
+cd Orchestrix
 
-## Problem Statement
+# Start all services
+docker-compose up -d
 
-Modern backend systems often need to execute long-running or failure-prone tasks asynchronously:
-- background processing
-- retries with backoff
-- reliable state tracking
-- safe cancellation
-- operational visibility
+# Check health
+curl http://localhost:8080/health
+```
 
-Orchestrix addresses this by providing a **job lifecycle–driven execution engine** that ensures:
-- no silent failures
-- explicit state transitions
-- durable execution semantics
-- observability-first design
+### Run Locally
+```bash
+# Start PostgreSQL
+docker-compose up -d postgres
 
----
+# Run migrations
+make migrate-up
 
-## High-Level Architecture
+# Start server
+go run cmd/server/main.go
+```
 
-At a high level, Orchestrix consists of:
+## API Usage
 
-- **HTTP API** — job submission and inspection
-- **Job Service** — business logic and invariants
-- **State Machine** — enforces valid lifecycle transitions
-- **Scheduler** — selects runnable jobs
-- **Worker Pool** — executes jobs concurrently
-- **Persistence Layer** — durable job state storage
-- **Observability Layer** — structured logs and metrics
+### Create a Job
+```bash
+curl -X POST http://localhost:8080/api/v1/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "demo_job",
+    "payload": {"message": "hello world"}
+  }'
+```
 
-📄 Full system design: **[`docs/design.md`](docs/design.md)**
+**Response:**
+```json
+{
+  "id": "01KG94QDSXNW96W84543ZG5PY5",
+  "type": "demo_job",
+  "state": "PENDING",
+  "created_at": "2026-01-31T09:54:37Z"
+}
+```
 
----
+### Get Job Status
+```bash
+curl http://localhost:8080/api/v1/jobs/01KG94QDSXNW96W84543ZG5PY5
+```
 
-## Job Lifecycle Model
+### List Jobs by State
+```bash
+curl "http://localhost:8080/api/v1/jobs?state=SUCCEEDED&limit=10"
+```
 
-Jobs move through an explicit, auditable state machine:
+### Cancel a Job
+```bash
+curl -X DELETE http://localhost:8080/api/v1/jobs/01KG94QDSXNW96W84543ZG5PY5
+```
 
+## Architecture
+```
+┌─────────────┐
+│   HTTP API  │  ← REST endpoints (port 8080)
+└──────┬──────┘
+       │
+┌──────▼──────┐
+│ Job Service │  ← Business logic, validation
+└──────┬──────┘
+       │
+┌──────▼──────┐
+│ Repository  │  ← Data access (PostgreSQL)
+└──────┬──────┘
+       │
+┌──────▼──────┐
+│  Database   │  ← PostgreSQL
+└─────────────┘
+
+Background Workers:
+┌───────────┐      ┌────────────┐      ┌──────────┐
+│ Scheduler │─────→│ Job Queue  │─────→│ Workers  │
+│ (Polls DB)│      │ (Channel)  │      │ (Pool)   │
+└───────────┘      └────────────┘      └──────────┘
+```
+
+## Job Lifecycle
+```
 PENDING → SCHEDULED → RUNNING → SUCCEEDED
-↓
-FAILED
-↓
-┌──────── retries remaining ────────┐
-↓ ↓
-RETRYING FAILED (terminal)
-↓
-SCHEDULED
+                  ↓              ↓
+                  └─→ RETRYING ─→ FAILED (after max retries)
+                  ↓
+                  └─→ CANCELLED (user action)
+```
 
-CANCELLED (terminal, from any non-terminal state)
+## Configuration
 
-yaml
-Copy code
+Configuration is loaded from environment variables:
+```bash
+DB_HOST=localhost           # Database host
+DB_PORT=5434               # Database port
+DB_USER=orchestrix         # Database user
+DB_PASSWORD=***            # Database password
+DB_NAME=orchestrix_dev     # Database name
+DB_SSLMODE=disable         # SSL mode
+```
 
-All transitions are validated and recorded to provide a complete execution history.
+## Monitoring
 
----
+### Prometheus Metrics
 
-## Planned Features
+Available at `http://localhost:8080/metrics`:
 
-- ✅ REST API for job submission and inspection
-- ✅ Explicit job state machine with audit trail
-- ✅ Asynchronous execution via worker pool
-- ✅ Automatic retries with exponential backoff
-- ✅ Safe cancellation of pending/running jobs
-- ✅ PostgreSQL-backed persistence
-- ✅ Structured logging (`log/slog`)
-- ✅ Prometheus-compatible metrics
-- ✅ Graceful shutdown and crash recovery
+- `orchestrix_jobs_created_total` - Total jobs created
+- `orchestrix_jobs_succeeded_total` - Total successful jobs
+- `orchestrix_jobs_failed_total` - Total failed jobs
+- `orchestrix_job_duration_seconds` - Job execution time histogram
+- `orchestrix_queue_depth` - Current jobs in queue
 
----
+### Health Check
+```bash
+curl http://localhost:8080/health
+```
 
-## Project Structure
+## Development
 
-cmd/
-server/ Application entry point
+### Project Structure
+```
+orchestrix/
+├── cmd/server/           # Application entry point
+├── internal/
+│   ├── api/              # HTTP handlers
+│   ├── job/
+│   │   ├── model/        # Job domain model
+│   │   ├── service/      # Business logic
+│   │   ├── state/        # State machine
+│   │   └── repository/   # Data access
+│   ├── scheduler/        # Job scheduler
+│   ├── worker/           # Worker pool
+│   └── executor/         # Job executors
+├── migrations/           # Database migrations
+├── docker-compose.yml    # Docker services
+└── Dockerfile           # Container build
+```
 
-internal/
-api/ HTTP handlers and routing
-job/
-model/ Job domain models
-service/ Business logic
-state/ State machine
-repository/ Data persistence
-scheduler/ Job scheduling logic
-worker/ Worker pool and execution
-executor/ Job type executors
-config/ Configuration management
-observability/ Logging and metrics
+### Running Tests
+```bash
+# Unit tests
+go test ./...
 
-pkg/
-errors/ Shared error types
+# Integration tests
+go test -v ./internal/worker/ -run Integration
 
-docs/ Architecture and API documentation
-migrations/ Database schema migrations
-configs/ Configuration files
+# With coverage
+go test -cover ./...
+```
 
-yaml
-Copy code
+### Database Migrations
+```bash
+# Apply migrations
+make migrate-up
 
----
+# Rollback last migration
+make migrate-down
 
-## Technology Stack
+# Create new migration
+make migrate-create name=add_priority_column
+```
 
-- **Language:** Go 1.22+
-- **HTTP:** `net/http` (stdlib)
-- **Logging:** `log/slog` (stdlib)
-- **Database:** PostgreSQL 15+
-- **Metrics:** Prometheus-compatible
-- **Configuration:** YAML-based, validated at startup
+## Production Deployment
 
-No frameworks, no ORMs, no hidden magic.
+### Build Docker Image
+```bash
+docker build -t orchestrix:latest .
+```
 
----
+### Deploy
+```bash
+# Using docker-compose
+docker-compose up -d
 
-## Design Principles
+# Or deploy to Kubernetes (k8s manifests not included)
+```
 
-- **Domain-first development**  
-  Infrastructure exists to support the domain, not the other way around.
+### Graceful Shutdown
 
-- **Explicit state over implicit behavior**  
-  Every job transition is validated and observable.
+The server handles SIGTERM/SIGINT signals:
 
-- **At-least-once execution semantics**  
-  Jobs must be idempotent by design.
+1. Stops accepting new requests
+2. Stops scheduler (no new jobs scheduled)
+3. Drains job queue (completes in-flight jobs)
+4. Shuts down after 30s timeout
 
-- **Fail fast, fail loud**  
-  Invalid states and configuration errors surface immediately.
+## Contributing
 
-- **Single-node first, scale later**  
-  Distribution is a future concern, not an assumption.
-
----
-
-## Running Locally
-
-> 🚧 Coming soon
-
-Local execution instructions will be added once:
-- core domain logic is complete
-- persistence layer is finalized
-
----
-
-## API Documentation
-
-API specifications and examples will live in:
-
-docs/api.md
-
-yaml
-Copy code
-
----
-
-## Roadmap (High Level)
-
-1. Core domain state machine
-2. In-memory execution engine
-3. Scheduler and worker pool
-4. Persistence and recovery
-5. HTTP API
-6. Observability hardening
-7. Production readiness
-
-Each step is developed and committed incrementally.
-
----
-
-## Non-Goals
-
-Orchestrix intentionally does **not** aim to be:
-- a distributed queue system
-- a workflow DAG engine (yet)
-- a cloud-managed service
-- a Kubernetes replacement
-
-Those concerns are explicitly deferred.
-
----
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests
+5. Submit a pull request
 
 ## License
 
-MIT License
-
----
+MIT License - See LICENSE file
 
 ## Author
 
-Built and maintained by **Dipak** as a serious backend systems project, with a focus on correctness, clarity, and long-term maintainability.
+Built by [@dipak0000812](https://github.com/dipak0000812)
+
+## Support
+
+- Issues: [GitHub Issues](https://github.com/dipak0000812/Orchestrix/issues)
+- Discussions: [GitHub Discussions](https://github.com/dipak0000812/Orchestrix/discussions)
