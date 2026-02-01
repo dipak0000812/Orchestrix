@@ -9,19 +9,20 @@ import (
 
 	"github.com/dipak0000812/orchestrix/internal/job/service"
 	"github.com/dipak0000812/orchestrix/internal/job/state"
+	"github.com/dipak0000812/orchestrix/internal/metrics"
 )
 
 // Handler holds dependencies for HTTP handlers.
 type Handler struct {
 	jobService *service.JobService
-	metrics    *Metrics
+	metrics    *metrics.Metrics
 }
 
 // NewHandler creates a new API handler.
-func NewHandler(jobService *service.JobService, metrics *Metrics) *Handler {
+func NewHandler(jobService *service.JobService, m *metrics.Metrics) *Handler {
 	return &Handler{
 		jobService: jobService,
-		metrics:    metrics,
+		metrics:    m,
 	}
 }
 
@@ -120,6 +121,7 @@ func (h *Handler) CancelJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.metrics.JobsCancelled.Inc()
 	w.WriteHeader(http.StatusNoContent)
 }
 

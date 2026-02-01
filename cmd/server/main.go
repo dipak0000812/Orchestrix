@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv" // ← Add this
+	"strconv"
 	"syscall"
 	"time"
 
@@ -16,6 +16,7 @@ import (
 	"github.com/dipak0000812/orchestrix/internal/job/repository"
 	"github.com/dipak0000812/orchestrix/internal/job/service"
 	"github.com/dipak0000812/orchestrix/internal/job/state"
+	"github.com/dipak0000812/orchestrix/internal/metrics"
 	"github.com/dipak0000812/orchestrix/internal/scheduler"
 	"github.com/dipak0000812/orchestrix/internal/worker"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -57,14 +58,15 @@ func main() {
 	executors.Register("demo_job", executor.NewDemoExecutor(1*time.Second))
 	log.Println("Registered executors: demo_job")
 
-	// 4. Create job channel
+	// 4. Create job channel and metrics
 	jobChannel := make(chan *model.Job, 100)
+	m := metrics.NewMetrics()
 
 	// 5. Create and start scheduler
 	sched := scheduler.NewScheduler(
-		jobService,
-		1*time.Second, // Poll interval
-		10,            // Batch size
+		repo,
+		1*time.Second,
+		10,
 		jobChannel,
 	)
 	sched.Start()
@@ -72,19 +74,18 @@ func main() {
 
 	// 6. Create and start worker pool
 	workers := worker.NewWorkerPool(
-		5, // Number of workers
+		5,
 		jobChannel,
 		executors,
 		jobService,
-		10*time.Second, // Job timeout
+		m, // ← Added: metrics
+		10*time.Second,
 	)
 	workers.Start()
 	defer workers.Stop()
 
 	// 7. Create HTTP handler and router
-	// 7. Create metrics and HTTP handler
-	metrics := api.NewMetrics()
-	handler := api.NewHandler(jobService, metrics) // ← Pass metrics
+	handler := api.NewHandler(jobService, m)
 
 	router := http.NewServeMux()
 	router.HandleFunc("POST /api/v1/jobs", handler.CreateJob)
@@ -92,7 +93,7 @@ func main() {
 	router.HandleFunc("GET /api/v1/jobs", handler.ListJobs)
 	router.HandleFunc("DELETE /api/v1/jobs/{id}", handler.CancelJob)
 	router.HandleFunc("GET /health", handler.Health)
-	router.Handle("GET /metrics", promhttp.Handler()) // ← Add this
+	router.Handle("GET /metrics", promhttp.Handler())
 
 	// 8. Create HTTP server
 	server := &http.Server{
@@ -126,7 +127,6 @@ func main() {
 	log.Println("Shutdown complete")
 }
 
-// getEnv gets environment variable or returns default.
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -134,7 +134,6 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
-// getEnvInt gets environment variable as int or returns default.
 func getEnvInt(key string, defaultValue int) int {
 	if value := os.Getenv(key); value != "" {
 		if parsed, err := strconv.Atoi(value); err == nil {

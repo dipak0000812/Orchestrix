@@ -8,13 +8,12 @@ import (
 	"time"
 
 	"github.com/dipak0000812/orchestrix/internal/job/model"
-	"github.com/dipak0000812/orchestrix/internal/job/service"
-	"github.com/dipak0000812/orchestrix/internal/job/state"
+	"github.com/dipak0000812/orchestrix/internal/job/repository"
 )
 
 // Scheduler polls the database for PENDING jobs and schedules them.
 type Scheduler struct {
-	service      *service.JobService
+	repository   *repository.PostgresJobRepository
 	pollInterval time.Duration
 	batchSize    int
 	jobChannel   chan *model.Job
@@ -26,7 +25,7 @@ type Scheduler struct {
 
 // NewScheduler creates a new scheduler.
 func NewScheduler(
-	jobService *service.JobService,
+	jobRepository *repository.PostgresJobRepository,
 	pollInterval time.Duration,
 	batchSize int,
 	jobChannel chan *model.Job,
@@ -34,7 +33,7 @@ func NewScheduler(
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Scheduler{
-		service:      jobService,
+		repository:   jobRepository,
 		pollInterval: pollInterval,
 		batchSize:    batchSize,
 		jobChannel:   jobChannel,
@@ -68,22 +67,20 @@ func (s *Scheduler) run() {
 	for {
 		select {
 		case <-ticker.C:
-			// Poll for jobs
 			s.pollAndSchedule()
 
 		case <-s.ctx.Done():
-			// Shutdown signal received
 			return
 		}
 	}
 }
 
-// pollAndSchedule finds PENDING jobs and schedules them.
+// pollAndSchedule finds and claims PENDING jobs atomically.
 func (s *Scheduler) pollAndSchedule() {
-	// Find PENDING jobs
-	jobs, err := s.service.ListJobsByState(s.ctx, state.PENDING, s.batchSize)
+	// Atomically claim pending jobs (locks + updates state to SCHEDULED)
+	jobs, err := s.repository.ClaimPendingJobs(s.ctx, s.batchSize)
 	if err != nil {
-		log.Printf("Failed to list pending jobs: %v", err)
+		log.Printf("Failed to claim pending jobs: %v", err)
 		return
 	}
 
@@ -93,37 +90,27 @@ func (s *Scheduler) pollAndSchedule() {
 
 	log.Printf("Found %d pending jobs", len(jobs))
 
-	// Schedule each job
+	// Send jobs to worker pool
 	for _, job := range jobs {
-		if err := s.scheduleJob(job); err != nil {
-			log.Printf("Failed to schedule job %s: %v", job.ID, err)
+		if err := s.sendToWorkers(job); err != nil {
+			log.Printf("Failed to send job %s to workers: %v", job.ID, err)
 			continue
 		}
 	}
 }
 
-// scheduleJob transitions a job to SCHEDULED and sends it to the worker pool.
-func (s *Scheduler) scheduleJob(job *model.Job) error {
-	// Transition to SCHEDULED
-	if err := s.service.TransitionState(s.ctx, job.ID, state.SCHEDULED); err != nil {
-		return err
-	}
-
-	// Update local copy's state (so workers see correct state)
-	job.State = state.SCHEDULED
-
-	// Send to job channel (non-blocking with timeout)
+// sendToWorkers sends a job to the worker pool channel.
+func (s *Scheduler) sendToWorkers(job *model.Job) error {
+	// Job is already in SCHEDULED state from ClaimPendingJobs
 	select {
 	case s.jobChannel <- job:
 		log.Printf("Scheduled job %s (type: %s)", job.ID, job.Type)
 		return nil
 
 	case <-time.After(5 * time.Second):
-		// Channel full for 5 seconds, something's wrong
 		return fmt.Errorf("timeout sending job to channel")
 
 	case <-s.ctx.Done():
-		// Shutdown in progress
 		return s.ctx.Err()
 	}
 }

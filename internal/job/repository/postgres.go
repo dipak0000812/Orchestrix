@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -219,4 +220,96 @@ func (r *PostgresJobRepository) Delete(ctx context.Context, id string) error {
 	}
 
 	return nil
+}
+
+// ClaimPendingJobs atomically claims pending jobs by locking and transitioning them to SCHEDULED.
+// This prevents race conditions when multiple schedulers are running.
+func (r *PostgresJobRepository) ClaimPendingJobs(ctx context.Context, limit int) ([]*model.Job, error) {
+	// Start a transaction - critical for holding the lock
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) // Rollback if we don't commit
+
+	// Query with FOR UPDATE SKIP LOCKED to prevent race conditions
+	query := `
+		SELECT
+	    id, type, payload, state, attempt, max_attempts, last_error,
+		created_at, scheduled_at, started_at, completed_at
+		FROM jobs
+		WHERE state = $1
+		ORDER BY created_at ASC
+		LIMIT $2
+		FOR UPDATE SKIP LOCKED
+	`
+
+	rows, err := tx.Query(ctx, query, state.PENDING, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query pending jobs: %w", err)
+	}
+	defer rows.Close()
+
+	// Collect the jobs and their IDs
+	var jobs []*model.Job
+	var jobIDs []string
+
+	for rows.Next() {
+		var job model.Job
+		err := rows.Scan(
+			&job.ID,
+			&job.Type,
+			&job.Payload,
+			&job.State,
+			&job.Attempt,
+			&job.MaxAttempts,
+			&job.LastError,
+			&job.CreatedAt,
+			&job.ScheduledAt,
+			&job.StartedAt,
+			&job.CompletedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan job: %w", err)
+		}
+		jobs = append(jobs, &job)
+		jobIDs = append(jobIDs, job.ID)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating jobs: %w", err)
+	}
+
+	// If no jobs found, return early
+	if len(jobs) == 0 {
+		return jobs, nil
+	}
+
+	// Update all claimed jobs to SCHEDULED state (still within transaction)
+	// This happens while we still hold the locks!
+	updateQuery := `
+		UPDATE jobs
+		SET state = $1, scheduled_at = NOW()
+		WHERE id = ANY($2)
+	`
+
+	_, err = tx.Exec(ctx, updateQuery, state.SCHEDULED, jobIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update job states: %w", err)
+	}
+
+	// Commit the transaction - locks are released here
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	// Update the in-memory job objects to reflect the new state
+	for _, job := range jobs {
+		job.State = state.SCHEDULED
+
+		now := time.Now()
+		job.ScheduledAt = &now
+	}
+
+	return jobs, nil
 }

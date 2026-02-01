@@ -3,16 +3,32 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/dipak0000812/orchestrix/internal/executor"
-	"github.com/dipak0000812/orchestrix/internal/job/model" // ← Add this
+	"github.com/dipak0000812/orchestrix/internal/job/model"
 	"github.com/dipak0000812/orchestrix/internal/job/repository"
 	"github.com/dipak0000812/orchestrix/internal/job/service"
 	"github.com/dipak0000812/orchestrix/internal/job/state"
+	"github.com/dipak0000812/orchestrix/internal/metrics"
 	"github.com/dipak0000812/orchestrix/internal/scheduler"
 )
+
+// metricsOnce ensures metrics are only registered once across all tests.
+// Prometheus panics if you register the same metric name twice.
+var (
+	testMetrics     *metrics.Metrics
+	testMetricsOnce sync.Once
+)
+
+func getTestMetrics() *metrics.Metrics {
+	testMetricsOnce.Do(func() {
+		testMetrics = metrics.NewMetrics()
+	})
+	return testMetrics
+}
 
 // setupIntegrationTest creates a complete test environment.
 func setupIntegrationTest(t *testing.T) (
@@ -21,7 +37,6 @@ func setupIntegrationTest(t *testing.T) (
 	*WorkerPool,
 	chan *model.Job,
 ) {
-	// Create database connection
 	cfg := repository.DBConfig{
 		Host:            "localhost",
 		Port:            5434,
@@ -40,44 +55,41 @@ func setupIntegrationTest(t *testing.T) (
 		t.Fatalf("Failed to create connection pool: %v", err)
 	}
 
-	// Clean up test data
 	_, err = pool.Exec(context.Background(), "DELETE FROM jobs")
 	if err != nil {
 		t.Fatalf("Failed to clean test data: %v", err)
 	}
 
-	// Create repository
 	repo := repository.NewPostgresJobRepository(pool)
 
-	// Create job service
 	stateMachine := state.NewStateMachine()
 	idGen := service.NewULIDGenerator()
 	retryConfig := service.DefaultRetryConfig()
 	jobService := service.NewJobService(repo, stateMachine, idGen, retryConfig)
 
-	// Create executor registry
 	executors := executor.NewExecutorRegistry()
 	executors.Register("demo_job", executor.NewDemoExecutor(100*time.Millisecond))
 	executors.Register("failing_job", executor.NewFailingExecutor())
 
-	// Create job channel
 	jobChannel := make(chan *model.Job, 10)
 
-	// Create scheduler
+	// Use shared metrics instance — not NewMetrics() every time
+	m := getTestMetrics()
+
 	sched := scheduler.NewScheduler(
-		jobService,
-		500*time.Millisecond, // Poll every 500ms
-		5,                    // Batch size
+		repo,
+		500*time.Millisecond,
+		5,
 		jobChannel,
 	)
 
-	// Create worker pool
 	workers := NewWorkerPool(
-		3, // 3 workers
+		3,
 		jobChannel,
 		executors,
 		jobService,
-		5*time.Second, // Job timeout
+		m,
+		5*time.Second,
 	)
 
 	return jobService, sched, workers, jobChannel
@@ -87,23 +99,19 @@ func TestIntegration_HappyPath(t *testing.T) {
 	jobService, sched, workers, _ := setupIntegrationTest(t)
 	ctx := context.Background()
 
-	// Start scheduler and workers
 	sched.Start()
 	workers.Start()
 	defer sched.Stop()
 	defer workers.Stop()
 
-	// Create a job
 	payload, _ := json.Marshal(map[string]string{"message": "test"})
 	job, err := jobService.CreateJob(ctx, "demo_job", payload)
 	if err != nil {
 		t.Fatalf("Failed to create job: %v", err)
 	}
 
-	// Wait for job to complete (scheduler polls every 500ms, job takes 100ms)
 	time.Sleep(2 * time.Second)
 
-	// Verify job succeeded
 	updated, err := jobService.GetJob(ctx, job.ID)
 	if err != nil {
 		t.Fatalf("Failed to get job: %v", err)
@@ -118,24 +126,19 @@ func TestIntegration_JobFailsAndRetries(t *testing.T) {
 	jobService, sched, workers, _ := setupIntegrationTest(t)
 	ctx := context.Background()
 
-	// Start scheduler and workers
 	sched.Start()
 	workers.Start()
 	defer sched.Stop()
 	defer workers.Stop()
 
-	// Create a failing job
 	payload, _ := json.Marshal(map[string]string{"test": "data"})
 	job, err := jobService.CreateJob(ctx, "failing_job", payload)
 	if err != nil {
 		t.Fatalf("Failed to create job: %v", err)
 	}
 
-	// Wait for job to fail and retry multiple times
-	// Each attempt: schedule (500ms) + execute (instant fail) + retry delay
 	time.Sleep(8 * time.Second)
 
-	// Verify job failed after exhausting retries
 	updated, err := jobService.GetJob(ctx, job.ID)
 	if err != nil {
 		t.Fatalf("Failed to get job: %v", err)
@@ -158,13 +161,11 @@ func TestIntegration_MultipleJobs(t *testing.T) {
 	jobService, sched, workers, _ := setupIntegrationTest(t)
 	ctx := context.Background()
 
-	// Start scheduler and workers
 	sched.Start()
 	workers.Start()
 	defer sched.Stop()
 	defer workers.Stop()
 
-	// Create 10 jobs
 	numJobs := 10
 	payload, _ := json.Marshal(map[string]string{"test": "data"})
 
@@ -175,14 +176,8 @@ func TestIntegration_MultipleJobs(t *testing.T) {
 		}
 	}
 
-	// Wait for all jobs to complete
-	// 3 workers can process 3 jobs in parallel
-	// 10 jobs / 3 workers = ~4 batches
-	// Each job takes 100ms, so ~400ms total
-	// Add scheduler polling time: 500ms
 	time.Sleep(3 * time.Second)
 
-	// Verify all jobs succeeded
 	succeededJobs, err := jobService.ListJobsByState(ctx, state.SUCCEEDED, 20)
 	if err != nil {
 		t.Fatalf("Failed to list succeeded jobs: %v", err)
