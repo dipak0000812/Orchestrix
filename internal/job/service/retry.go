@@ -44,7 +44,11 @@ func (c RetryConfig) CalculateBackoff(attempt int) time.Duration {
 	}
 
 	// Add random jitter (prevents thundering herd)
-	jitter := time.Duration(rand.Int63n(int64(c.MaxJitter)))
+	// Only add jitter if MaxJitter > 0 to avoid panic in rand.Int63n
+	var jitter time.Duration
+	if c.MaxJitter > 0 {
+		jitter = time.Duration(rand.Int63n(int64(c.MaxJitter)))
+	}
 
 	return time.Duration(delay) + jitter
 }

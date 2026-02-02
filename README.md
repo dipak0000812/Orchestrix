@@ -214,6 +214,34 @@ The server handles SIGTERM/SIGINT signals:
 3. Drains job queue (completes in-flight jobs)
 4. Shuts down after 30s timeout
 
+## Challenges Solved
+
+### Race Condition in Scheduler
+The scheduler polls the database for pending jobs every second. 
+When multiple instances run, the same job could be picked up twice.
+
+**Fix**: Used PostgreSQL's `SELECT FOR UPDATE SKIP LOCKED` inside 
+a transaction to atomically claim jobs. Each scheduler instance 
+gets different jobs with zero duplicates.
+
+### Silent Failures  
+When an executor wasn't registered for a job type, the job would 
+retry forever, wasting resources.
+
+**Fix**: Classified errors as retryable vs permanent. Missing executors 
+and panics go straight to FAILED. Only actual execution errors retry.
+
+### Import Cycle
+Adding metrics to the worker package created a circular dependency: 
+worker → api → worker.
+
+**Fix**: Extracted metrics into its own dedicated package that both 
+api and worker import independently.
+
+
+
+Status: v1 complete. Future versions may introduce Redis/Kafka-backed queues and service separation.
+
 ## Contributing
 
 1. Fork the repository
