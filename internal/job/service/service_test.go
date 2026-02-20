@@ -90,7 +90,7 @@ func setupTestService() *JobService {
 	idGen := &mockIDGenerator{nextID: "test_job_123"}
 	retryConfig := DefaultRetryConfig()
 
-	return NewJobService(repo, stateMachine, idGen, retryConfig)
+	return NewJobService(repo, stateMachine, idGen, retryConfig, nil)
 }
 
 func TestCreateJob(t *testing.T) {
@@ -99,7 +99,7 @@ func TestCreateJob(t *testing.T) {
 
 	payload, _ := json.Marshal(map[string]string{"email": "user@example.com"})
 
-	job, err := service.CreateJob(ctx, "send_email", payload)
+	job, err := service.CreateJob(ctx, "send_email", payload, nil)
 	if err != nil {
 		t.Fatalf("CreateJob failed: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestCreateJob_EmptyType(t *testing.T) {
 	service := setupTestService()
 	ctx := context.Background()
 
-	_, err := service.CreateJob(ctx, "", []byte("{}"))
+	_, err := service.CreateJob(ctx, "", []byte("{}"), nil)
 	if err == nil {
 		t.Error("Expected error for empty job type")
 	}
@@ -136,7 +136,7 @@ func TestCreateJob_InvalidJSON(t *testing.T) {
 	service := setupTestService()
 	ctx := context.Background()
 
-	_, err := service.CreateJob(ctx, "test", []byte("{invalid json"))
+	_, err := service.CreateJob(ctx, "test", []byte("{invalid json"), nil)
 	if err == nil {
 		t.Error("Expected error for invalid JSON payload")
 	}
@@ -148,7 +148,7 @@ func TestGetJob(t *testing.T) {
 
 	// Create a job first
 	payload, _ := json.Marshal(map[string]string{"test": "data"})
-	created, _ := service.CreateJob(ctx, "test_job", payload)
+	created, _ := service.CreateJob(ctx, "test_job", payload, nil)
 
 	// Retrieve it
 	retrieved, err := service.GetJob(ctx, created.ID)
@@ -177,7 +177,7 @@ func TestTransitionState(t *testing.T) {
 
 	// Create job in PENDING state
 	payload, _ := json.Marshal(map[string]string{"test": "data"})
-	job, _ := service.CreateJob(ctx, "test_job", payload)
+	job, _ := service.CreateJob(ctx, "test_job", payload, nil)
 
 	// Transition to SCHEDULED
 	err := service.TransitionState(ctx, job.ID, state.SCHEDULED)
@@ -203,7 +203,7 @@ func TestTransitionState_Invalid(t *testing.T) {
 
 	// Create job in PENDING state
 	payload, _ := json.Marshal(map[string]string{"test": "data"})
-	job, _ := service.CreateJob(ctx, "test_job", payload)
+	job, _ := service.CreateJob(ctx, "test_job", payload, nil)
 
 	// Try invalid transition: PENDING → SUCCEEDED (must go through SCHEDULED, RUNNING)
 	err := service.TransitionState(ctx, job.ID, state.SUCCEEDED)
@@ -218,7 +218,7 @@ func TestHandleFailure_CanRetry(t *testing.T) {
 
 	// Create job
 	payload, _ := json.Marshal(map[string]string{"test": "data"})
-	job, _ := service.CreateJob(ctx, "test_job", payload)
+	job, _ := service.CreateJob(ctx, "test_job", payload, nil)
 
 	// Transition to RUNNING (simulate job execution)
 	service.TransitionState(ctx, job.ID, state.SCHEDULED)
@@ -254,7 +254,7 @@ func TestHandleFailure_ExhaustedRetries(t *testing.T) {
 
 	// Create job
 	payload, _ := json.Marshal(map[string]string{"test": "data"})
-	job, _ := service.CreateJob(ctx, "test_job", payload)
+	job, _ := service.CreateJob(ctx, "test_job", payload, nil)
 
 	// Simulate 3 failed attempts (max_attempts = 3)
 	service.TransitionState(ctx, job.ID, state.SCHEDULED)
@@ -286,7 +286,7 @@ func TestCancelJob(t *testing.T) {
 
 	// Create job
 	payload, _ := json.Marshal(map[string]string{"test": "data"})
-	job, _ := service.CreateJob(ctx, "test_job", payload)
+	job, _ := service.CreateJob(ctx, "test_job", payload, nil)
 
 	// Cancel it
 	err := service.CancelJob(ctx, job.ID)
@@ -312,7 +312,7 @@ func TestCancelJob_AlreadyTerminal(t *testing.T) {
 
 	// Create job and transition to SUCCEEDED (terminal)
 	payload, _ := json.Marshal(map[string]string{"test": "data"})
-	job, _ := service.CreateJob(ctx, "test_job", payload)
+	job, _ := service.CreateJob(ctx, "test_job", payload, nil)
 	service.TransitionState(ctx, job.ID, state.SCHEDULED)
 	service.TransitionState(ctx, job.ID, state.RUNNING)
 	service.TransitionState(ctx, job.ID, state.SUCCEEDED)
@@ -334,12 +334,12 @@ func TestListJobsByState(t *testing.T) {
 	// Create 3 PENDING jobs
 	for i := 1; i <= 3; i++ {
 		service.idGenerator.(*mockIDGenerator).nextID = fmt.Sprintf("job_%d", i)
-		service.CreateJob(ctx, "test", payload)
+		service.CreateJob(ctx, "test", payload, nil)
 	}
 
 	// Create 1 RUNNING job
 	service.idGenerator.(*mockIDGenerator).nextID = "job_running"
-	runningJob, _ := service.CreateJob(ctx, "test", payload)
+	runningJob, _ := service.CreateJob(ctx, "test", payload, nil)
 	service.TransitionState(ctx, runningJob.ID, state.SCHEDULED)
 	service.TransitionState(ctx, runningJob.ID, state.RUNNING)
 

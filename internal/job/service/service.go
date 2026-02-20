@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/dipak0000812/orchestrix/internal/job/dependency"
 	"github.com/dipak0000812/orchestrix/internal/job/model"
 	"github.com/dipak0000812/orchestrix/internal/job/repository"
 	"github.com/dipak0000812/orchestrix/internal/job/state"
@@ -18,6 +19,7 @@ type JobService struct {
 	stateMachine *state.StateMachine
 	idGenerator  IDGenerator
 	retryConfig  RetryConfig
+	resolver     *dependency.Resolver // NEW
 }
 
 // NewJobService creates a new job service.
@@ -26,49 +28,64 @@ func NewJobService(
 	stateMachine *state.StateMachine,
 	idGenerator IDGenerator,
 	retryConfig RetryConfig,
+	resolver *dependency.Resolver, // NEW
 ) *JobService {
 	return &JobService{
 		repo:         repo,
 		stateMachine: stateMachine,
 		idGenerator:  idGenerator,
 		retryConfig:  retryConfig,
+		resolver:     resolver, // NEW
 	}
 }
 
 // CreateJob creates a new job with initial state PENDING.
-func (s *JobService) CreateJob(ctx context.Context, jobType string, payload []byte) (*model.Job, error) {
+func (s *JobService) CreateJob(ctx context.Context, jobType string, payload []byte, dependsOn []string) (*model.Job, error) {
 	// Validate input
 	if jobType == "" {
 		return nil, fmt.Errorf("job type is required")
 	}
-
 	// Validate payload is valid JSON
 	if len(payload) > 0 && !json.Valid(payload) {
 		return nil, fmt.Errorf("payload must be valid JSON")
 	}
-
 	// Generate unique ID
 	id := s.idGenerator.Generate()
 
-	// Create job with initial state
+	// Jobs with dependencies start in WAITING state.
+	// Jobs without dependencies start in PENDING state (ready immediately).
+	initialState := state.PENDING
+	if len(dependsOn) > 0 {
+		initialState = state.WAITING
+	}
+
+	// Create job
 	job := &model.Job{
 		ID:          id,
 		Type:        jobType,
 		Payload:     payload,
-		State:       state.PENDING,
+		State:       initialState,
 		Attempt:     1,
-		MaxAttempts: 3, // Default, could be configurable
+		MaxAttempts: 3,
 		CreatedAt:   time.Now(),
 	}
-
 	// Validate job
 	if err := job.Validate(); err != nil {
 		return nil, fmt.Errorf("job validation failed: %w", err)
 	}
-
 	// Save to repository
 	if err := s.repo.Create(ctx, job); err != nil {
 		return nil, fmt.Errorf("failed to create job: %w", err)
+	}
+
+	// Register dependencies (includes cycle detection)
+	if len(dependsOn) > 0 {
+		if err := s.resolver.AddDependencies(ctx, job.ID, dependsOn); err != nil {
+			// Dependency registration failed - delete the job we just created
+			// to avoid orphaned WAITING jobs in the database
+			_ = s.repo.Delete(ctx, job.ID)
+			return nil, fmt.Errorf("failed to register dependencies: %w", err)
+		}
 	}
 
 	return job, nil

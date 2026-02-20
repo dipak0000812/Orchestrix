@@ -315,3 +315,83 @@ func (r *PostgresJobRepository) ClaimPendingJobs(ctx context.Context, limit int)
 
 	return jobs, nil
 }
+
+// GetParents returns all parent job IDs for a given job.
+func (r *PostgresJobRepository) GetParents(ctx context.Context, jobID string) ([]string, error) {
+	query := `
+		SELECT parent_job_id 
+		FROM job_dependencies 
+		WHERE child_job_id = $1
+	`
+	rows, err := r.pool.Query(ctx, query, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get parents of %s: %w", jobID, err)
+	}
+	defer rows.Close()
+
+	var parents []string
+	for rows.Next() {
+		var parentID string
+		if err := rows.Scan(&parentID); err != nil {
+			return nil, fmt.Errorf("failed to scan parent ID: %w", err)
+		}
+		parents = append(parents, parentID)
+	}
+	return parents, rows.Err()
+}
+
+// GetChildren returns all child job IDs for a given job.
+func (r *PostgresJobRepository) GetChildren(ctx context.Context, jobID string) ([]string, error) {
+	query := `
+		SELECT child_job_id 
+		FROM job_dependencies 
+		WHERE parent_job_id = $1
+	`
+	rows, err := r.pool.Query(ctx, query, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get children of %s: %w", jobID, err)
+	}
+	defer rows.Close()
+
+	var children []string
+	for rows.Next() {
+		var childID string
+		if err := rows.Scan(&childID); err != nil {
+			return nil, fmt.Errorf("failed to scan child ID: %w", err)
+		}
+		children = append(children, childID)
+	}
+	return children, rows.Err()
+}
+
+// AddDependency creates a parent → child relationship in the database.
+func (r *PostgresJobRepository) AddDependency(ctx context.Context, parentID, childID string) error {
+	query := `
+		INSERT INTO job_dependencies (parent_job_id, child_job_id)
+		VALUES ($1, $2)
+		ON CONFLICT (parent_job_id, child_job_id) DO NOTHING
+	`
+	_, err := r.pool.Exec(ctx, query, parentID, childID)
+	if err != nil {
+		return fmt.Errorf("failed to add dependency %s → %s: %w", parentID, childID, err)
+	}
+	return nil
+}
+
+// UpdateJobState transitions a job to a new state.
+// Used by the dependency resolver to transition WAITING → PENDING or CANCELLED.
+func (r *PostgresJobRepository) UpdateJobState(ctx context.Context, jobID string, newState state.State) error {
+	query := `
+		UPDATE jobs 
+		SET state = $1 
+		WHERE id = $2
+	`
+	result, err := r.pool.Exec(ctx, query, newState, jobID)
+	if err != nil {
+		return fmt.Errorf("failed to update state of job %s to %s: %w", jobID, newState, err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("job %s not found", jobID)
+	}
+	return nil
+}

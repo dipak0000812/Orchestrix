@@ -35,6 +35,10 @@ const (
 	// CANCELLED: Job was explicitly cancelled by user.
 	// Terminal state — job will not execute or retry.
 	CANCELLED State = "CANCELLED"
+
+	// WAITING: Job is waiting for parent dependencies to complete.
+	// Will transition to PENDING when all parents succeed.
+	WAITING State = "WAITING"
 )
 
 // IsTerminal returns true if the state is terminal (no transitions out).
@@ -46,7 +50,7 @@ func (s State) IsTerminal() bool {
 // IsValid returns true if the state is a recognized job state.
 func (s State) IsValid() bool {
 	switch s {
-	case PENDING, SCHEDULED, RUNNING, SUCCEEDED, FAILED, RETRYING, CANCELLED:
+	case PENDING, WAITING, SCHEDULED, RUNNING, SUCCEEDED, FAILED, RETRYING, CANCELLED:
 		return true
 	default:
 		return false
@@ -82,6 +86,9 @@ func (sm *StateMachine) CanTransition(from, to State) bool {
 
 	// Define allowed transitions as a set of valid (from, to) pairs
 	switch from {
+	case WAITING:
+		return to == PENDING || to == CANCELLED
+
 	case PENDING:
 		return to == SCHEDULED || to == CANCELLED
 
@@ -139,8 +146,8 @@ func (sm *StateMachine) AllowedTransitions(from State) []State {
 	}
 
 	var allowed []State
-	// Check all possible states
-	allStates := []State{PENDING, SCHEDULED, RUNNING, SUCCEEDED, FAILED, RETRYING, CANCELLED}
+	// WAITING added so it appears in allowed transitions output
+	allStates := []State{PENDING, WAITING, SCHEDULED, RUNNING, SUCCEEDED, FAILED, RETRYING, CANCELLED}
 
 	for _, to := range allStates {
 		if sm.CanTransition(from, to) {
