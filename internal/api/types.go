@@ -9,8 +9,9 @@ import (
 
 // CreateJobRequest represents the request body for creating a job.
 type CreateJobRequest struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
+	Type      string          `json:"type"`
+	Payload   json.RawMessage `json:"payload"`
+	DependsOn []string        `json:"depends_on,omitempty"` // NEW
 }
 
 // JobResponse represents a job in API responses.
@@ -21,6 +22,7 @@ type JobResponse struct {
 	Attempt     int        `json:"attempt"`
 	MaxAttempts int        `json:"max_attempts"`
 	LastError   *string    `json:"last_error,omitempty"`
+	DependsOn   []string   `json:"depends_on,omitempty"` // NEW
 	CreatedAt   time.Time  `json:"created_at"`
 	ScheduledAt *time.Time `json:"scheduled_at,omitempty"`
 	StartedAt   *time.Time `json:"started_at,omitempty"`

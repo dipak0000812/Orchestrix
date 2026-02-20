@@ -40,7 +40,7 @@ func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job, err := h.jobService.CreateJob(r.Context(), req.Type, req.Payload)
+	job, err := h.jobService.CreateJob(r.Context(), req.Type, req.Payload, req.DependsOn)
 	if err != nil {
 		log.Printf("Failed to create job: %v", err)
 		h.metrics.HTTPRequests.WithLabelValues("POST", "/api/v1/jobs", "400").Inc()
