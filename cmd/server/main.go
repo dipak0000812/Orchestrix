@@ -12,6 +12,7 @@ import (
 
 	"github.com/dipak0000812/orchestrix/internal/api"
 	"github.com/dipak0000812/orchestrix/internal/executor"
+	"github.com/dipak0000812/orchestrix/internal/job/dependency"
 	"github.com/dipak0000812/orchestrix/internal/job/model"
 	"github.com/dipak0000812/orchestrix/internal/job/repository"
 	"github.com/dipak0000812/orchestrix/internal/job/service"
@@ -51,7 +52,8 @@ func main() {
 	stateMachine := state.NewStateMachine()
 	idGen := service.NewULIDGenerator()
 	retryConfig := service.DefaultRetryConfig()
-	jobService := service.NewJobService(repo, stateMachine, idGen, retryConfig)
+	resolver := dependency.NewResolver(repo)
+	jobService := service.NewJobService(repo, stateMachine, idGen, retryConfig, resolver)
 
 	// 3. Create executor registry
 	executors := executor.NewExecutorRegistry()
