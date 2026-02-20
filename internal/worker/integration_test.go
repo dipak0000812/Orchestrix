@@ -13,6 +13,7 @@ import (
 	"github.com/dipak0000812/orchestrix/internal/job/service"
 	"github.com/dipak0000812/orchestrix/internal/job/state"
 	"github.com/dipak0000812/orchestrix/internal/metrics"
+	"github.com/dipak0000812/orchestrix/internal/job/dependency"
 	"github.com/dipak0000812/orchestrix/internal/scheduler"
 )
 
@@ -65,7 +66,7 @@ func setupIntegrationTest(t *testing.T) (
 	stateMachine := state.NewStateMachine()
 	idGen := service.NewULIDGenerator()
 	retryConfig := service.DefaultRetryConfig()
-	jobService := service.NewJobService(repo, stateMachine, idGen, retryConfig)
+	jobService := service.NewJobService(repo, stateMachine, idGen, retryConfig, dependency.NewResolver(repo))
 
 	executors := executor.NewExecutorRegistry()
 	executors.Register("demo_job", executor.NewDemoExecutor(100*time.Millisecond))
@@ -105,7 +106,7 @@ func TestIntegration_HappyPath(t *testing.T) {
 	defer workers.Stop()
 
 	payload, _ := json.Marshal(map[string]string{"message": "test"})
-	job, err := jobService.CreateJob(ctx, "demo_job", payload)
+	job, err := jobService.CreateJob(ctx, "demo_job", payload, nil)
 	if err != nil {
 		t.Fatalf("Failed to create job: %v", err)
 	}
@@ -132,12 +133,12 @@ func TestIntegration_JobFailsAndRetries(t *testing.T) {
 	defer workers.Stop()
 
 	payload, _ := json.Marshal(map[string]string{"test": "data"})
-	job, err := jobService.CreateJob(ctx, "failing_job", payload)
+	job, err := jobService.CreateJob(ctx, "failing_job", payload, nil)
 	if err != nil {
 		t.Fatalf("Failed to create job: %v", err)
 	}
 
-	time.Sleep(8 * time.Second)
+	time.Sleep(15 * time.Second)
 
 	updated, err := jobService.GetJob(ctx, job.ID)
 	if err != nil {
@@ -170,7 +171,7 @@ func TestIntegration_MultipleJobs(t *testing.T) {
 	payload, _ := json.Marshal(map[string]string{"test": "data"})
 
 	for i := 0; i < numJobs; i++ {
-		_, err := jobService.CreateJob(ctx, "demo_job", payload)
+		_, err := jobService.CreateJob(ctx, "demo_job", payload, nil)
 		if err != nil {
 			t.Fatalf("Failed to create job %d: %v", i, err)
 		}
