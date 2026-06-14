@@ -1,6 +1,6 @@
 # Orchestrix 🎯
 
-A production-grade job orchestration engine built in Go.
+designed and tested for production patterns.
 
 ## Features
 
