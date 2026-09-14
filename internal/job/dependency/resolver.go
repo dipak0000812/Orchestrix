@@ -23,8 +23,9 @@ type Repository interface {
 	// GetByID retrieves a job by ID.
 	GetByID(ctx context.Context, id string) (*model.Job, error)
 
-	// UpdateJobState transitions a job to a new state.
-	UpdateJobState(ctx context.Context, jobID string, newState state.State) error
+	// UpdateJobStateIfCurrent transitions a job only while it remains in
+	// expectedState. A false result means another actor changed the job first.
+	UpdateJobStateIfCurrent(ctx context.Context, jobID string, expectedState, newState state.State) (bool, error)
 }
 
 // Resolver handles job dependency logic.
@@ -131,20 +132,51 @@ func (r *Resolver) OnJobSucceeded(ctx context.Context, jobID string) error {
 	}
 
 	for _, childID := range children {
-		// Check if ALL parents of this child have succeeded
-		allSucceeded, err := r.allParentsSucceeded(ctx, childID)
-		if err != nil {
-			return fmt.Errorf("failed to check parents of %s: %w", childID, err)
-		}
-
-		if allSucceeded {
-			// All parents done - child can now be executed
-			if err := r.repo.UpdateJobState(ctx, childID, state.PENDING); err != nil {
-				return fmt.Errorf("failed to transition %s to PENDING: %w", childID, err)
-			}
+		if err := r.ActivateIfReady(ctx, childID); err != nil {
+			return fmt.Errorf("activate child %s: %w", childID, err)
 		}
 	}
 	return nil
+}
+
+// ActivateIfReady transitions a WAITING job to PENDING once every parent has
+// succeeded. It is also used immediately after creating a dependency so a job
+// whose parents already completed does not remain stuck in WAITING.
+func (r *Resolver) ActivateIfReady(ctx context.Context, jobID string) error {
+	allSucceeded, err := r.allParentsSucceeded(ctx, jobID)
+	if err != nil {
+		return fmt.Errorf("check parents: %w", err)
+	}
+	if !allSucceeded {
+		return nil
+	}
+
+	job, err := r.repo.GetByID(ctx, jobID)
+	if err != nil {
+		return fmt.Errorf("get job: %w", err)
+	}
+	if job.State != state.WAITING {
+		return nil
+	}
+
+	updated, err := r.repo.UpdateJobStateIfCurrent(ctx, jobID, state.WAITING, state.PENDING)
+	if err != nil {
+		return fmt.Errorf("transition to PENDING: %w", err)
+	}
+	if !updated {
+		return nil
+	}
+	return nil
+}
+
+// GetParents returns a job's direct dependencies. Keeping this query on the
+// resolver prevents the API layer from coupling directly to persistence.
+func (r *Resolver) GetParents(ctx context.Context, jobID string) ([]string, error) {
+	parents, err := r.repo.GetParents(ctx, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("get parents of %s: %w", jobID, err)
+	}
+	return parents, nil
 }
 
 // OnJobFailed is called when a job fails permanently.
@@ -166,7 +198,10 @@ func (r *Resolver) OnJobFailed(ctx context.Context, jobID string) error {
 		// Only cancel jobs that are still waiting or pending
 		// Don't touch jobs that are already running or terminal
 		if job.State == state.WAITING || job.State == state.PENDING {
-			if err := r.repo.UpdateJobState(ctx, descendantID, state.CANCELLED); err != nil {
+			// The CAS is best-effort: if another actor already transitioned
+			// this job away from job.State, we simply move on to the next
+			// descendant rather than treat it as an error.
+			if _, err := r.repo.UpdateJobStateIfCurrent(ctx, descendantID, job.State, state.CANCELLED); err != nil {
 				return fmt.Errorf("failed to cancel descendant %s: %w", descendantID, err)
 			}
 		}

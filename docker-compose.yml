@@ -1,4 +1,11 @@
 services:
+  # NOTE: the password below is a documented local-development-only value,
+  # shared between this file and the app container's DB_PASSWORD. It is
+  # intentionally NOT a hardcoded fallback anywhere in the application code
+  # (cmd/server/main.go requires DB_PASSWORD to be set explicitly and fails
+  # fast otherwise, with a startup warning if this exact value is ever used
+  # against a non-local host). Override it here (and in orchestrix's
+  # DB_PASSWORD below) before deploying anywhere but a local machine.
   postgres:
     image: postgres:16-alpine
     container_name: orchestrix-postgres
@@ -17,6 +24,22 @@ services:
       timeout: 5s
       retries: 5
 
+  migrate:
+    image: migrate/migrate:v4.19.1
+    container_name: orchestrix-migrate
+    command:
+      [
+        "-path=/migrations",
+        "-database=postgres://orchestrix:orchestrix_dev_password@postgres:5432/orchestrix_dev?sslmode=disable",
+        "up",
+      ]
+    volumes:
+      - ./migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   orchestrix:
     build: .
     container_name: orchestrix-app
@@ -24,6 +47,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       DB_HOST: postgres
       DB_PORT: 5432
@@ -31,6 +56,7 @@ services:
       DB_PASSWORD: orchestrix_dev_password
       DB_NAME: orchestrix_dev
       DB_SSLMODE: disable
+      CONFIG_PATH: /app/configs/base.yaml
     ports:
       - "8080:8080"
 

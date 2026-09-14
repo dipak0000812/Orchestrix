@@ -11,7 +11,7 @@ import (
 type CreateJobRequest struct {
 	Type      string          `json:"type"`
 	Payload   json.RawMessage `json:"payload"`
-	DependsOn []string        `json:"depends_on,omitempty"` // NEW
+	DependsOn []string        `json:"depends_on,omitempty"`
 }
 
 // JobResponse represents a job in API responses.
@@ -22,7 +22,8 @@ type JobResponse struct {
 	Attempt     int        `json:"attempt"`
 	MaxAttempts int        `json:"max_attempts"`
 	LastError   *string    `json:"last_error,omitempty"`
-	DependsOn   []string   `json:"depends_on,omitempty"` // NEW
+	DependsOn   []string   `json:"depends_on,omitempty"`
+	NextRunAt   *time.Time `json:"next_run_at,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	ScheduledAt *time.Time `json:"scheduled_at,omitempty"`
 	StartedAt   *time.Time `json:"started_at,omitempty"`
@@ -55,6 +56,8 @@ func toJobResponse(job *model.Job) JobResponse {
 		Attempt:     job.Attempt,
 		MaxAttempts: job.MaxAttempts,
 		LastError:   job.LastError,
+		DependsOn:   job.DependsOn,
+		NextRunAt:   job.NextRunAt,
 		CreatedAt:   job.CreatedAt,
 		ScheduledAt: job.ScheduledAt,
 		StartedAt:   job.StartedAt,

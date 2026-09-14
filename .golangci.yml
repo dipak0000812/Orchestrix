@@ -1,0 +1,25 @@
+run:
+  timeout: 5m
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - gosimple
+    - gofmt
+
+issues:
+  exclude-rules:
+    # Tests routinely discard errors from setup/fixture calls (e.g.
+    # service.CreateJob, repo.Create) where the test's actual assertions
+    # are on the state read back afterward, not the setup call itself.
+    - path: _test\.go
+      linters:
+        - errcheck
+
+  exclude-dirs:
+    - vendor

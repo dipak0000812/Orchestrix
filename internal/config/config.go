@@ -12,7 +12,6 @@ import (
 // Only foundational runtime config lives here.
 type Config struct {
 	Server   ServerConfig   `yaml:"server"`
-	Logging  LoggingConfig  `yaml:"logging"`
 	Shutdown ShutdownConfig `yaml:"shutdown"`
 }
 
@@ -20,13 +19,28 @@ type ServerConfig struct {
 	Port int `yaml:"port"`
 }
 
-type LoggingConfig struct {
-	Level  string `yaml:"level"`
-	Format string `yaml:"format"`
+type ShutdownConfig struct {
+	Timeout Duration `yaml:"timeout"`
 }
 
-type ShutdownConfig struct {
-	Timeout time.Duration `yaml:"timeout"`
+// Duration parses a human-readable Go duration from YAML, for example "30s".
+type Duration time.Duration
+
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	var raw string
+	if err := value.Decode(&raw); err != nil {
+		return fmt.Errorf("duration must be a string: %w", err)
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		return fmt.Errorf("parse duration %q: %w", raw, err)
+	}
+	*d = Duration(parsed)
+	return nil
+}
+
+func (d Duration) Std() time.Duration {
+	return time.Duration(d)
 }
 
 // Load reads configuration from a YAML file.
@@ -52,18 +66,6 @@ func Load(path string) (*Config, error) {
 func (c *Config) validate() error {
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
 		return fmt.Errorf("invalid server.port: %d", c.Server.Port)
-	}
-
-	switch c.Logging.Level {
-	case "debug", "info", "warn", "error":
-	default:
-		return fmt.Errorf("invalid logging.level: %s", c.Logging.Level)
-	}
-
-	switch c.Logging.Format {
-	case "json", "text":
-	default:
-		return fmt.Errorf("invalid logging.format: %s", c.Logging.Format)
 	}
 
 	if c.Shutdown.Timeout <= 0 {

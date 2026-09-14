@@ -19,18 +19,23 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o orchestrix ./cmd/server
 
 # Runtime stage
-FROM alpine:latest
+FROM alpine:3.22
 
 # Install ca-certificates for HTTPS
 RUN apk --no-cache add ca-certificates
 
-WORKDIR /root/
+RUN addgroup -S orchestrix && adduser -S orchestrix -G orchestrix
 
-# Copy binary from builder
-COPY --from=builder /app/orchestrix .
+WORKDIR /app
+
+# Copy the application and its required runtime configuration.
+COPY --from=builder --chown=orchestrix:orchestrix /app/orchestrix ./orchestrix
+COPY --from=builder --chown=orchestrix:orchestrix /app/configs ./configs
 
 # Expose port
 EXPOSE 8080
+
+USER orchestrix
 
 # Run
 CMD ["./orchestrix"]

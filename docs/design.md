@@ -2,43 +2,39 @@
 
 ## Overview
 
-Orchestrix is a backend job orchestration service designed to execute asynchronous tasks reliably while providing explicit lifecycle management, retry semantics, and operational visibility.
+Orchestrix is a backend job orchestration service designed to execute asynchronous tasks reliably with explicit lifecycle management, DAG dependency resolution, retry semantics, and operational visibility.
 
-The system is intentionally built as a **single-binary monolith** with strong internal boundaries. This design prioritizes correctness, debuggability, and maintainability before horizontal scalability.
-
-This document describes the **architecture, domain model, execution flow, and design decisions** behind Orchestrix.
+The system is built as a single-binary architecture with strong internal domain boundaries, prioritizing correctness, debuggability, and maintainability.
 
 ---
 
 ## Goals
 
 ### Functional Goals
-- Accept jobs asynchronously and return immediately
-- Execute jobs in the background with controlled concurrency
-- Track job lifecycle explicitly via a state machine
-- Retry failed jobs with bounded exponential backoff
-- Allow inspection of job status and execution history
-- Support safe cancellation of jobs
+- Accept jobs asynchronously and return immediately with generated ULIDs.
+- Execute jobs in the background with controlled worker pool concurrency.
+- Enforce explicit job lifecycle transitions via a strict state machine.
+- Retry failed jobs using configurable exponential backoff with persisted schedules.
+- Execute DAG dependency graphs, holding child jobs in `WAITING` until all parent jobs succeed.
+- Automatically cancel downstream dependent jobs when a parent permanently fails.
+- Provide HTTP REST endpoints to inspect, list, and safely cancel jobs.
+- Enforce tenant isolation and API key authentication.
 
 ### Non-Functional Goals
-- Zero silent job loss
-- Deterministic state transitions
-- Clear failure modes
-- Observability-first design
-- Safe shutdown and crash recovery
+- Zero silent job loss.
+- Deterministic, Compare-And-Swap (CAS) state transitions.
+- SSRF-safe outbound network execution.
+- Observability via structured metrics and health endpoints.
+- Predictable, bounded shutdown and crash recovery.
 
 ---
 
 ## Non-Goals
 
-Orchestrix explicitly does **not** aim to:
-- Be a distributed queue system (e.g., Kafka, SQS)
-- Provide exactly-once execution guarantees
-- Support multi-node coordination in v1
-- Act as a DAG/workflow engine
-- Abstract infrastructure details behind heavy frameworks
-
-These concerns are deferred intentionally.
+Orchestrix explicitly does not aim to:
+- Act as a distributed stream broker (e.g., Kafka, SQS).
+- Provide distributed multi-datacenter consensus in v1 (relies on PostgreSQL row locks).
+- Abstract database internals behind heavy ORM frameworks.
 
 ---
 
@@ -46,281 +42,108 @@ These concerns are deferred intentionally.
 
 ```
 Client
+  │ (Bearer Auth)
+  ▼
+HTTP API Router & Middleware (Body limit, Auth)
   │
   ▼
-HTTP API
+Job Service ──── ULID Generator & Retry Backoff Calculator
   │
-  ▼
-Job Service
-  │
-  ▼
-State Machine ──── Repository (DB)
-  │                     │
-  ▼                     ▼
-Scheduler          Job Records
-  │
-  ▼
-Worker Pool
-  │
-  ▼
-Job Executor
+  ├───────────────────────────────┐
+  ▼                               ▼
+State Machine (In-Memory)   DAG Dependency Resolver
+  │                               │
+  └──────────────┬────────────────┘
+                 ▼
+          Repository (PostgreSQL)
+                 │
+                 ▼
+          Scheduler (Adaptive Poller)
+                 │
+                 ▼ (jobChannel)
+          Worker Pool (Workers: 5)
+                 │
+                 ▼
+          Executor Registry (SSRF Guard, Demo, Checksum)
 ```
-
-Each component has a **single, well-defined responsibility** and communicates through explicit interfaces.
 
 ---
 
 ## Core Domain Model
 
 ### Job
-
-A job represents a unit of asynchronous work.
-
-Key properties:
-- Unique identity
-- Explicit lifecycle state
-- Retry metadata
-- Execution timestamps
-- Failure context
-
-Jobs are **stateful**, not fire-and-forget.
+A stateful unit of asynchronous execution containing:
+- `ID`: 26-character time-sortable monotonic ULID.
+- `Type`: Job identifier mapped to an Executor implementation.
+- `Payload`: Job-specific JSON bytes (max 1 MiB).
+- `State`: Explicit lifecycle state.
+- `Attempt`: Current attempt counter (1-indexed).
+- `MaxAttempts`: Maximum allowable retries.
+- `LastError`: Last execution failure message.
+- `OwnerKeyID`: Multi-tenant ownership key.
+- `NextRunAt`: Timestamp for retry backoff scheduling.
+- `CreatedAt`, `ScheduledAt`, `StartedAt`, `CompletedAt`: Execution timestamps.
 
 ---
 
 ## Job Lifecycle State Machine
 
 ### States
+| State | Description | Terminal |
+| :--- | :--- | :--- |
+| `WAITING` | Waiting for parent dependency jobs to complete | No |
+| `PENDING` | Accepted and ready for scheduling | No |
+| `SCHEDULED` | Claimed by scheduler and dispatched to worker channel | No |
+| `RUNNING` | Actively executing on a worker goroutine | No |
+| `RETRYING` | Failed execution; waiting for exponential backoff elapsed time | No |
+| `SUCCEEDED` | Successfully completed | **Yes** |
+| `FAILED` | Permanently failed (retries exhausted or fatal error) | **Yes** |
+| `CANCELLED` | Explicitly cancelled by user or parent failure cascade | **Yes** |
 
-| State       | Description |
-|------------|-------------|
-| `PENDING`   | Job accepted but not yet scheduled |
-| `SCHEDULED` | Selected for execution |
-| `RUNNING`   | Currently executing |
-| `SUCCEEDED` | Completed successfully (terminal) |
-| `FAILED`    | Permanently failed (terminal) |
-| `RETRYING`  | Waiting for retry backoff |
-| `CANCELLED` | Cancelled by user/system (terminal) |
-
-### State Diagram
-
+### Transition Rules
 ```
-PENDING → SCHEDULED → RUNNING → SUCCEEDED
-                         ↓
-                      FAILED
-                         ↓
-          ┌──── retries remaining ────┐
-          ↓                            ↓
-      RETRYING                    FAILED (terminal)
-          ↓
-      SCHEDULED
-
-CANCELLED (terminal, from any non-terminal state)
+WAITING ──(all parents SUCCEEDED)──► PENDING ──► SCHEDULED ──► RUNNING ──► SUCCEEDED
+   │                                    │           │             │
+   │                                    │           │             ├──► RETRYING ──► SCHEDULED
+   │                                    │           │             │        │
+   │                                    │           │             │        └──(max retries)──► FAILED
+   │                                    │           │             │
+   └──────────────► CANCELLED ◄─────────┴───────────┴─────────────┴──────────────────────────► FAILED
 ```
 
-### Invariants
+---
 
-- Terminal states are irreversible
-- All transitions are validated
-- No implicit state changes
-- Every transition is auditable
+## DAG Dependency Management
 
-The **state machine is the source of truth** for correctness.
+Dependencies are modeled as parent-to-child directed edges in the `job_dependencies` table:
+1. **Cycle Detection**: Iterative Depth-First Search (DFS) runs before inserting edges to prevent dependency cycles.
+2. **Success Cascade**: When a parent completes, `OnJobSucceeded` queries child jobs. If all parents are `SUCCEEDED`, the child transitions `WAITING → PENDING`.
+3. **Failure Cascade**: When a parent reaches `FAILED`, `OnJobFailed` performs a Breadth-First Search (BFS) and cancels all waiting descendant jobs (`WAITING → CANCELLED`).
 
 ---
 
-## State Transitions
+## Scheduling & Concurrency Model
 
-Transitions are enforced centrally and never bypassed.
-
-Examples:
-- `PENDING → SCHEDULED` (scheduler selection)
-- `SCHEDULED → RUNNING` (worker pickup)
-- `RUNNING → FAILED` (execution error)
-- `FAILED → RETRYING` (retry policy)
-- `RUNNING → CANCELLED` (user cancellation)
-
-Invalid transitions fail fast.
+- **Atomic Claiming**: Uses `SELECT ... FOR UPDATE SKIP LOCKED` to prevent duplicate execution across concurrent schedulers.
+- **Adaptive Polling**: Claims immediately when a batch is full; backs off to `pollInterval` (1s) when idle, minimizing database CPU overhead.
+- **Worker Pool**: Buffered work queue consumed by a fixed set of goroutines with per-worker panic recovery.
+- **Optimistic Concurrency Control**: Repository updates use `UPDATE jobs ... WHERE id = $1 AND state = $expectedState`, preventing race conditions.
 
 ---
 
-## Scheduler
+## Security Architecture
 
-### Responsibility
-Select runnable jobs and dispatch them for execution.
-
-### Design
-- Polls the repository periodically
-- Selects jobs in `PENDING` or `RETRYING` state
-- Attempts state transition before enqueueing
-- Never executes jobs directly
-
-### Rationale
-Polling is chosen for:
-- Predictability
-- Simplicity
-- Single-node correctness
-
-Event-driven scheduling is deferred.
+1. **Authentication**: All routes (except `/health`) require `Authorization: Bearer <token>`. Keys are stored as SHA-256 hashes.
+2. **Tenant Isolation**: Jobs are partitioned by `owner_key_id`. Cross-tenant queries return uniform `404 Not Found`.
+3. **SSRF Guard**: Custom HTTP dialer resolves hostnames and blocks connections to private RFC 1918, loopback, link-local, or multicast IPs before opening TCP sockets.
+4. **DoS Mitigation**: Global request body limiter (1 MiB), result pagination cap (500), and CPU `work_factor` ceiling (100,000).
 
 ---
 
-## Worker Pool
+## Graceful Teardown
 
-### Responsibility
-Execute jobs concurrently within bounded capacity.
-
-### Design
-- Fixed-size worker pool
-- Shared buffered work queue
-- Panic recovery per worker
-- Context-based cancellation
-
-### Execution Guarantees
-- At-least-once execution
-- Idempotency required at job level
-- Worker failure does not crash the system
-
----
-
-## Retry Strategy
-
-### Semantics
-- Retries occur only after failure
-- Retries are bounded
-- Backoff grows exponentially
-
-### Backoff Model
-```
-delay = min(base * 2^attempt, maxDelay)
-```
-
-### Guarantees
-- No infinite retry loops
-- No thundering herd on failure
-- Deterministic retry behavior
-
----
-
-## Persistence Layer
-
-### Responsibility
-Provide durable storage for job state and history.
-
-### Design
-- Relational database (PostgreSQL)
-- Explicit transactions
-- Optimistic locking on state updates
-- Job events stored separately for audit
-
-### Crash Recovery
-On startup:
-- Jobs in `RUNNING` state are reconciled
-- Failed executions are retried or marked terminal
-
----
-
-## Observability
-
-### Logging
-- Structured logs using `log/slog`
-- Correlation by job ID
-- No logging inside domain entities
-
-### Metrics
-- Job counts by state
-- Execution durations
-- Retry counts
-- Worker utilization
-
-### Health
-- Liveness checks
-- Dependency readiness
-
-Observability is treated as a **first-class feature**, not an add-on.
-
----
-
-## Error Handling Strategy
-
-- Domain errors are typed and explicit
-- Infrastructure errors are wrapped
-- Errors propagate upward without being swallowed
-- API layer maps errors to external responses
-
-This ensures failures are visible and actionable.
-
----
-
-## Configuration Philosophy
-
-- Minimal configuration surface
-- Validation at startup
-- No runtime mutation
-- Explicit defaults
-
-Configuration exists to support behavior, not to define it.
-
----
-
-## Concurrency Model
-
-- Goroutines for workers and scheduler
-- Channels for work dispatch
-- Mutexes only at repository boundaries
-- Database as the final arbiter of correctness
-
-The system avoids shared mutable state outside well-defined boundaries.
-
----
-
-## Shutdown Semantics
-
-On shutdown:
-1. Stop accepting new jobs
-2. Halt scheduler
-3. Drain worker queue
-4. Wait for in-flight jobs (bounded)
-5. Exit cleanly
-
-Shutdown is **deterministic and observable**.
-
----
-
-## Design Tradeoffs
-
-| Decision | Benefit | Cost |
-|----------|---------|------|
-| Monolith | Simpler correctness | No horizontal scaling |
-| Polling scheduler | Predictable | Scheduling latency |
-| At-least-once | Simpler | Requires idempotent jobs |
-| No frameworks | Transparency | More boilerplate |
-| Explicit state machine | Correctness | More code |
-
-These tradeoffs are **intentional**, not accidental.
-
----
-
-## Future Considerations (Explicitly Deferred)
-
-- Multi-node scheduling
-- Distributed locking
-- Workflow/DAG support
-- Priority queues
-- Rate limiting per job type
-- Exactly-once semantics
-
-Deferred features are documented to avoid accidental scope creep.
-
----
-
-## Summary
-
-Orchestrix is designed as a **correctness-first backend system**.
-
-The architecture favors:
-- Explicit state
-- Observable behavior
-- Bounded complexity
-- Incremental evolution
-
-This design allows Orchestrix to grow without rewriting its foundations.
+1. Stops accepting incoming HTTP requests.
+2. Stops scheduler poller (no new jobs claimed).
+3. Closes worker dispatch channels.
+4. Waits for in-flight worker executions to complete up to `shutdownGracePeriod`.
+5. Cancels contexts and cleanly closes PostgreSQL connection pools.

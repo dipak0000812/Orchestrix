@@ -1,4 +1,5 @@
--- Create job dependencies table
+-- Create job dependency edges. The file name follows golang-migrate's
+-- version_name.up.sql convention so `make migrate-up` discovers it.
 CREATE TABLE IF NOT EXISTS job_dependencies (
     parent_job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
     child_job_id  TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -7,10 +8,8 @@ CREATE TABLE IF NOT EXISTS job_dependencies (
     CHECK (parent_job_id <> child_job_id)
 );
 
--- Fast lookup: "what are the parents of job X?"
 CREATE INDEX IF NOT EXISTS idx_job_dependencies_child
     ON job_dependencies(child_job_id);
 
--- Fast lookup: "what are the children of job X?"
 CREATE INDEX IF NOT EXISTS idx_job_dependencies_parent
     ON job_dependencies(parent_job_id);

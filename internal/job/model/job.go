@@ -19,6 +19,16 @@ type Job struct {
 	// Examples: "send_email", "process_video", "generate_report"
 	Type string
 
+	// DependsOn contains the IDs of jobs that must succeed before this job can run.
+	// It is populated by the service layer from the dependency relation.
+	DependsOn []string
+
+	// OwnerKeyID is the ID of the API key that created this job. Nil only
+	// for jobs created before authentication was introduced; every job
+	// created through the (now-required) authenticated API has this set,
+	// and it's what scopes GetJob/CancelJob/ListJobs to the calling key.
+	OwnerKeyID *string
+
 	// Payload contains the job-specific parameters as JSON.
 	// The structure depends on the job Type.
 	// Example for "send_email": {"to": "user@example.com", "subject": "Hi"}
@@ -38,6 +48,10 @@ type Job struct {
 	// LastError stores the error message from the most recent failure.
 	// Nil if the job hasn't failed yet.
 	LastError *string
+
+	// NextRunAt is the earliest time a RETRYING job may be claimed again.
+	// Nil for jobs that are not waiting for a retry delay.
+	NextRunAt *time.Time
 
 	// CreatedAt is when the job was first created.
 	// Always set, never nil.

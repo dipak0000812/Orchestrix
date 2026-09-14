@@ -12,9 +12,10 @@ import (
 // mockRepo is an in-memory repository for testing.
 // No database, no Docker, just a map.
 type mockRepo struct {
-	jobs     map[string]*model.Job
-	parents  map[string][]string // childID → []parentID
-	children map[string][]string // parentID → []childID
+	jobs                    map[string]*model.Job
+	beforeConditionalUpdate func()
+	parents                 map[string][]string // childID → []parentID
+	children                map[string][]string // parentID → []childID
 }
 
 func newMockRepo() *mockRepo {
@@ -51,11 +52,18 @@ func (m *mockRepo) AddDependency(_ context.Context, parentID, childID string) er
 	return nil
 }
 
-func (m *mockRepo) UpdateJobState(_ context.Context, jobID string, newState state.State) error {
-	if job, ok := m.jobs[jobID]; ok {
-		job.State = newState
+func (m *mockRepo) UpdateJobStateIfCurrent(_ context.Context, jobID string, expectedState, newState state.State) (bool, error) {
+	if m.beforeConditionalUpdate != nil {
+		hook := m.beforeConditionalUpdate
+		m.beforeConditionalUpdate = nil
+		hook()
 	}
-	return nil
+	job, ok := m.jobs[jobID]
+	if !ok || job.State != expectedState {
+		return false, nil
+	}
+	job.State = newState
+	return true, nil
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -181,6 +189,27 @@ func TestOnJobSucceeded_WaitsForAllParents(t *testing.T) {
 	// D should still be WAITING because B hasn't finished
 	if repo.jobs["D"].State != state.WAITING {
 		t.Errorf("expected D to be WAITING, got %s", repo.jobs["D"].State)
+	}
+}
+
+func TestOnJobSucceeded_DoesNotResurrectCancelledChild(t *testing.T) {
+	repo := newMockRepo()
+	repo.addJob("A", state.SUCCEEDED)
+	repo.addJob("B", state.WAITING)
+	repo.AddDependency(context.Background(), "A", "B")
+
+	// Cancellation wins if it occurs after the resolver observes WAITING but
+	// before the resolver's state update reaches the repository.
+	repo.beforeConditionalUpdate = func() {
+		repo.jobs["B"].State = state.CANCELLED
+	}
+
+	resolver := NewResolver(repo)
+	if err := resolver.OnJobSucceeded(context.Background(), "A"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if repo.jobs["B"].State != state.CANCELLED {
+		t.Errorf("child state = %s, want CANCELLED", repo.jobs["B"].State)
 	}
 }
 

@@ -16,9 +16,9 @@ type RetryConfig struct {
 // DefaultRetryConfig returns sensible retry defaults.
 func DefaultRetryConfig() RetryConfig {
 	return RetryConfig{
-		BaseDelay: 10 * time.Millisecond,
-		MaxDelay:  50 * time.Millisecond,
-		MaxJitter: 0,
+		BaseDelay: time.Second,
+		MaxDelay:  5 * time.Minute,
+		MaxJitter: time.Second,
 	}
 }
 
@@ -35,6 +35,9 @@ func DefaultRetryConfig() RetryConfig {
 //	Attempt 5: 2s  * 2^4 = 32s + jitter
 //	Attempt 10: Capped at 5m + jitter
 func (c RetryConfig) CalculateBackoff(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
 	// Exponential backoff: BaseDelay * 2^attempt
 	delay := float64(c.BaseDelay) * math.Pow(2, float64(attempt-1))
 
