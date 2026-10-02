@@ -38,7 +38,7 @@ GET /health
 
 ### 2. Create Job
 
-Creates a new asynchronous job with state `PENDING` (or `WAITING` if dependencies are specified).
+Creates a new asynchronous job with state `PENDING`, or `WAITING` when one or more dependencies have not yet succeeded. If all dependencies have already succeeded, the job can be activated to `PENDING` immediately.
 
 ```http
 POST /api/v1/jobs
@@ -72,7 +72,7 @@ Authorization: Bearer <API_KEY>
 {
   "id": "01KG94QDSXNW96W84543ZG5PY5",
   "type": "compute_checksum",
-  "state": "PENDING",
+  "state": "WAITING",
   "attempt": 1,
   "max_attempts": 3,
   "created_at": "2026-07-21T03:33:26Z"
@@ -112,7 +112,7 @@ Returned if the job does not exist or belongs to another API key.
 
 ### 4. List Jobs
 
-Lists jobs belonging to the authenticated API key, filtered by state.
+Lists jobs belonging to the authenticated API key, filtered by state. The response `total` is the number of jobs in this response, not the total number of matching jobs across all pages.
 
 ```http
 GET /api/v1/jobs?state=SUCCEEDED&limit=10
@@ -147,7 +147,7 @@ Authorization: Bearer <API_KEY>
 
 ### 5. Cancel Job
 
-Cancels a pending, waiting, or running job.
+Marks a cancellable job as `CANCELLED`. A running executor is not interrupted by this request; it may continue its work, but its later state transition can fail because the job is already cancelled.
 
 ```http
 DELETE /api/v1/jobs/{id}

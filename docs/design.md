@@ -14,18 +14,18 @@ The system is built as a single-binary architecture with strong internal domain 
 - Accept jobs asynchronously and return immediately with generated ULIDs.
 - Execute jobs in the background with controlled worker pool concurrency.
 - Enforce explicit job lifecycle transitions via a strict state machine.
-- Retry failed jobs using configurable exponential backoff with persisted schedules.
+- Retry failed jobs using exponential backoff with jitter and persisted schedules.
 - Execute DAG dependency graphs, holding child jobs in `WAITING` until all parent jobs succeed.
 - Automatically cancel downstream dependent jobs when a parent permanently fails.
 - Provide HTTP REST endpoints to inspect, list, and safely cancel jobs.
 - Enforce tenant isolation and API key authentication.
 
 ### Non-Functional Goals
-- Zero silent job loss.
+- Recover jobs left in `SCHEDULED` after a missed dispatch; automatic recovery of jobs left in `RUNNING` is not implemented.
 - Deterministic, Compare-And-Swap (CAS) state transitions.
 - SSRF-safe outbound network execution.
 - Observability via structured metrics and health endpoints.
-- Predictable, bounded shutdown and crash recovery.
+- Bounded worker shutdown and explicitly limited crash recovery.
 
 ---
 
@@ -118,14 +118,15 @@ WAITING ──(all parents SUCCEEDED)──► PENDING ──► SCHEDULED ─�
 Dependencies are modeled as parent-to-child directed edges in the `job_dependencies` table:
 1. **Cycle Detection**: Iterative Depth-First Search (DFS) runs before inserting edges to prevent dependency cycles.
 2. **Success Cascade**: When a parent completes, `OnJobSucceeded` queries child jobs. If all parents are `SUCCEEDED`, the child transitions `WAITING → PENDING`.
-3. **Failure Cascade**: When a parent reaches `FAILED`, `OnJobFailed` performs a Breadth-First Search (BFS) and cancels all waiting descendant jobs (`WAITING → CANCELLED`).
+3. **Failure Cascade**: When a parent reaches `FAILED`, `OnJobFailed` performs a Breadth-First Search (BFS) and attempts to cancel descendant jobs currently in `WAITING` or `PENDING`. Scheduled, running, and terminal descendants are not changed.
 
 ---
 
 ## Scheduling & Concurrency Model
 
-- **Atomic Claiming**: Uses `SELECT ... FOR UPDATE SKIP LOCKED` to prevent duplicate execution across concurrent schedulers.
-- **Adaptive Polling**: Claims immediately when a batch is full; backs off to `pollInterval` (1s) when idle, minimizing database CPU overhead.
+- **Atomic Claiming**: Within a transaction, the scheduler queries pending jobs and due retries separately using `SELECT ... FOR UPDATE SKIP LOCKED`, merges the candidates, updates selected rows to `SCHEDULED`, and commits. This prevents concurrent schedulers from claiming the same locked rows; it is not an exactly-once execution guarantee.
+- **Adaptive Polling**: Claims again immediately when a batch is full; waits `pollInterval` after a partial or empty claim. The server currently configures this interval as one second.
+- **Stale Dispatch Recovery**: At startup and during polling, jobs left in `SCHEDULED` for more than 30 seconds are returned to `PENDING`. `RUNNING` jobs are deliberately excluded because there is no heartbeat-based recovery protocol.
 - **Worker Pool**: Buffered work queue consumed by a fixed set of goroutines with per-worker panic recovery.
 - **Optimistic Concurrency Control**: Repository updates use `UPDATE jobs ... WHERE id = $1 AND state = $expectedState`, preventing race conditions.
 
@@ -140,10 +141,8 @@ Dependencies are modeled as parent-to-child directed edges in the `job_dependenc
 
 ---
 
-## Graceful Teardown
+## Shutdown and Crash Behavior
 
-1. Stops accepting incoming HTTP requests.
-2. Stops scheduler poller (no new jobs claimed).
-3. Closes worker dispatch channels.
-4. Waits for in-flight worker executions to complete up to `shutdownGracePeriod`.
-5. Cancels contexts and cleanly closes PostgreSQL connection pools.
+On process shutdown, the HTTP server stops accepting new requests. The worker pool stops picking up jobs, allows in-flight work up to its configured job timeout, cancels execution contexts if that grace period expires, and waits up to a further five seconds. An executor that ignores context cancellation can outlive `Stop()`. The scheduler is stopped afterward, and the PostgreSQL pool is closed when `main` returns.
+
+The scheduler recovers stale `SCHEDULED` jobs only. A process crash while a job is `RUNNING` can leave it in that state; the system does not promise exactly-once execution or automatic recovery of external side effects. Deployments that need recovery of running work require an explicit lease/heartbeat and idempotency strategy.

@@ -1,6 +1,6 @@
-# Orchestrix 🎯
+# Orchestrix
 
-A distributed, asynchronous job orchestration engine in Go backed by PostgreSQL. Orchestrix provides explicit state-machine lifecycle tracking, DAG dependency resolution, exponential retry backoff, concurrency control, and native Prometheus telemetry.
+A PostgreSQL-backed asynchronous job orchestration service in Go. Orchestrix provides explicit state-machine lifecycle tracking, DAG dependency resolution, exponential retry backoff, concurrency control, and Prometheus telemetry.
 
 ---
 
@@ -10,12 +10,12 @@ A distributed, asynchronous job orchestration engine in Go backed by PostgreSQL.
 - **DAG Dependency Execution** — Cycle-safe dependency graphs. Jobs with `depends_on` wait for parent completion; permanently failed parents cascade cancellations downstream.
 - **Automatic Retries & Backoff** — Configurable exponential backoff with jitter and persisted `next_run_at` scheduling.
 - **Concurrent Worker Pool** — Bounded worker pools with panic isolation and context cancellation.
-- **Adaptive Scheduling** — Continuous claim draining under backlog with idle backoff using `SELECT ... FOR UPDATE SKIP LOCKED`.
+- **Adaptive Scheduling** — Immediately claims another batch when the previous claim was full; waits for the configured poll interval after a partial or empty claim. Claims use `SELECT ... FOR UPDATE SKIP LOCKED`.
 - **Tenant Isolation & Auth** — API key authentication (`Bearer`) with SHA-256 hash storage and tenant-scoped job operations.
 - **SSRF-Safe Webhooks** — Outbound webhook requests validated at dial-time against private/link-local/loopback CIDRs.
 - **Persistent Storage** — PostgreSQL persistence via `pgx/v5` connection pooling with versioned SQL migrations.
 - **Observability** — Built-in Prometheus metrics (`/metrics`) and health checks (`/health`).
-- **Graceful Teardown** — Dual-stage shutdown letting in-flight jobs finish cleanly within bounded timeframes.
+- **Bounded Worker Shutdown** — Lets in-flight jobs run for a grace period, then cancels their contexts and waits for a bounded force-stop window.
 
 ---
 
@@ -144,40 +144,17 @@ WAITING ──(all parents succeed)──► PENDING ──► SCHEDULED ──�
 
 ---
 
-## Performance & Benchmarks
+## Performance and Benchmarks
 
-### Microbenchmarks
-```text
-pkg: internal/job/state
-BenchmarkValidateTransition-12             126,167,770 ops       10.01 ns/op    (0 allocs/op)
-BenchmarkValidateTransition_Invalid-12       3,925,479 ops      362.50 ns/op    (Error formatting)
+The repository contains Go benchmark functions and an opt-in scheduler sweep, but it does not include their raw run output or enough environment metadata to reproduce historical numbers. This README therefore makes no latency or throughput claims.
 
-pkg: internal/executor
-BenchmarkChecksumExecutor/work_factor_1      1,456,398 ops      840.20 ns/op
-BenchmarkChecksumExecutor/work_factor_1000       7,870 ops   162,338.00 ns/op
-BenchmarkWebhookExecutor-12                      4,174 ops   256,197.00 ns/op
-```
+`internal/job/repository/postgres_bench_test.go` benchmarks database operations. `internal/worker/throughput_bench_test.go` defines 17 scheduler configurations and seeds 500 ordinary jobs plus 10 retry-check jobs per configuration. It is not the 1-million-row query fixture described in a source comment. The throughput test uses Linux `/proc` counters and is skipped unless explicitly enabled:
 
-### Scheduler Sweeps & Concurrency Scaling
-Measured under real PostgreSQL backlogs:
-
-| Configuration | Jobs/sec | Claim p95 Latency | In-Memory Depth | Duplicates |
-| :--- | :--- | :--- | :--- | :--- |
-| `batch=10, poll=1s` | 9.09 | 7.0 ms | 5 | 0 |
-| `batch=50, poll=250ms` | 67.71 | 8.0 ms | 45 | 0 |
-| `batch=50, poll=100ms` | 83.75 | 6.6 ms | 45 | 0 |
-| **Adaptive (`batch=50, poll=1s fallback`)** | **84.10** | **7.2 ms** | **48** | **0** |
-
-### API Concurrency (k6 Load Test)
 ```bash
-k6 run -e MAX_VUS=100 -e RAMP_DURATION=15s -e HOLD_DURATION=45s loadtest/api_load_test.js
+RUN_THROUGHPUT_REVIEW=1 go test ./internal/worker/... -run '^TestThroughputDesignReview$' -v -timeout 30m
 ```
 
-| Virtual Users (VUs) | Requests | Error Rate | `create_job` p95 | `create_job` p99 | Throughput |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| 5 VUs | 332 | 0.00% | 4.48 ms | 6.59 ms | 16.5 req/s |
-| 30 VUs | 7,866 | 0.00% | 8.72 ms | 25.28 ms | 104.2 req/s |
-| 100 VUs | 25,286 | 0.00% | 33.31 ms | 111.42 ms | **335.8 req/s** |
+The worker and repository integration/benchmark helpers delete rows from the `jobs` table. Use only a disposable test database. No raw k6 summary is checked in. Also, the current k6 script sends no API key, while the API requires Bearer authentication; its requests will be rejected until the script is updated.
 
 ---
 
@@ -186,7 +163,7 @@ k6 run -e MAX_VUS=100 -e RAMP_DURATION=15s -e HOLD_DURATION=45s loadtest/api_loa
 | Area | Protection Mechanism |
 | :--- | :--- |
 | **Authentication** | Bearer API Keys stored as SHA-256 hashes. Verified via constant-time comparison. |
-| **Tenant Isolation** | All queries scoped by `owner_key_id`. Cross-tenant lookups return uniform `404 Not Found`. |
+| **Tenant Isolation** | Public API job lookups and lists are scoped by `owner_key_id`. Cross-tenant lookups return uniform `404 Not Found`. |
 | **SSRF Prevention** | Custom `http.Transport` validating resolved IPs at dial time (blocks loopback, RFC 1918, link-local, multicast). |
 | **DoS Defenses** | Request body capped at 1 MiB (`MaxBytesReader`), `?limit=` capped at 500, CPU `work_factor` capped at 100,000. |
 | **Error Masking** | Internal SQL and driver error details logged server-side only; callers receive safe generic messages. |
@@ -195,7 +172,7 @@ k6 run -e MAX_VUS=100 -e RAMP_DURATION=15s -e HOLD_DURATION=45s loadtest/api_loa
 
 ## Configuration
 
-Configuration values are loaded from `configs/base.yaml` and overridden via environment variables:
+The HTTP port and shutdown timeout are loaded from `configs/base.yaml`. Database connection settings, the config-file path, and the optional bootstrap API key are supplied through environment variables:
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
@@ -257,19 +234,18 @@ orchestrix/
 
 ## Testing & Verification
 
+Tests and database benchmarks connect to PostgreSQL at `localhost:5434` and test helpers delete existing rows from the `jobs` table. Start the migrations against a disposable database before running them; do not point these commands at data you need to keep.
+
 ```bash
-# Run unit and integration tests
+# Run tests (requires the disposable, migrated PostgreSQL database)
 go test ./...
 
-# Run race detector and coverage
-go test -race -coverprofile=coverage.out ./...
+# Match the CI race-detector and coverage command
+go test ./... -race -count=1 -coverprofile=coverage.out -coverpkg=./...
+go tool cover -func=coverage.out
 
-# Run benchmarks
+# Run Go benchmarks (database-backed benchmarks use the same disposable database)
 go test -bench=. -benchmem ./...
 ```
+No raw benchmark output is archived, so this README makes no measured performance claims.
 
----
-
-## License
-
-MIT License — see [LICENSE](LICENSE) for details.
