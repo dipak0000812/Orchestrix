@@ -3,11 +3,12 @@
 // Run with a live orchestrix server (see README for how to start one),
 // then:
 //
-//   k6 run loadtest/api_load_test.js
+//   k6 run -e API_KEY="$ORCHESTRIX_API_KEY" loadtest/api_load_test.js
 //
 // Override the target and load profile via env vars, e.g.:
 //
-//   k6 run -e BASE_URL=http://localhost:8080 \
+//   k6 run -e API_KEY="$ORCHESTRIX_API_KEY" \
+//          -e BASE_URL=http://localhost:8080 \
 //          -e MAX_VUS=50 \
 //          -e RAMP_DURATION=30s \
 //          -e HOLD_DURATION=1m \
@@ -24,9 +25,16 @@ import { check, sleep } from 'k6';
 import { Trend, Counter } from 'k6/metrics';
 
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
+const API_KEY = __ENV.API_KEY;
 const MAX_VUS = parseInt(__ENV.MAX_VUS || '20', 10);
 const RAMP_DURATION = __ENV.RAMP_DURATION || '30s';
 const HOLD_DURATION = __ENV.HOLD_DURATION || '1m';
+
+if (!API_KEY) {
+  throw new Error('API_KEY is required; pass it with -e API_KEY=<key>');
+}
+
+const authHeaders = { Authorization: `Bearer ${API_KEY}` };
 
 // Per-endpoint latency, tracked separately so create (a write, hits
 // Postgres INSERT) and get/list (reads) don't average each other out.
@@ -73,7 +81,7 @@ export default function () {
   });
 
   const createRes = http.post(`${BASE_URL}/api/v1/jobs`, body, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...authHeaders, 'Content-Type': 'application/json' },
     tags: { endpoint: 'create_job' },
   });
   createJobDuration.add(createRes.timings.duration);
@@ -98,6 +106,7 @@ export default function () {
 
   // 2. Read the job back -- a real point-lookup read.
   const getRes = http.get(`${BASE_URL}/api/v1/jobs/${jobID}`, {
+    headers: authHeaders,
     tags: { endpoint: 'get_job' },
   });
   getJobDuration.add(getRes.timings.duration);
@@ -118,6 +127,7 @@ export default function () {
   // anyway (it's what a monitoring/ops dashboard would actually poll).
   if (__ITER % 5 === 0) {
     const listRes = http.get(`${BASE_URL}/api/v1/jobs`, {
+      headers: authHeaders,
       tags: { endpoint: 'list_jobs' },
     });
     listJobsDuration.add(listRes.timings.duration);

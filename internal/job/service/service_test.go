@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,39 @@ import (
 // Mock ID Generator (for predictable tests)
 type mockIDGenerator struct {
 	nextID string
+}
+
+func TestULIDGeneratorConcurrentUniqueness(t *testing.T) {
+	const workerCount = 32
+	const idsPerWorker = 1000
+
+	generator := NewULIDGenerator()
+	start := make(chan struct{})
+	ids := make(chan string, workerCount*idsPerWorker)
+	var waitGroup sync.WaitGroup
+
+	for workerIndex := 0; workerIndex < workerCount; workerIndex++ {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			<-start
+			for idIndex := 0; idIndex < idsPerWorker; idIndex++ {
+				ids <- generator.Generate()
+			}
+		}()
+	}
+
+	close(start)
+	waitGroup.Wait()
+	close(ids)
+
+	seen := make(map[string]struct{}, workerCount*idsPerWorker)
+	for id := range ids {
+		if _, exists := seen[id]; exists {
+			t.Fatalf("duplicate generated ID: %s", id)
+		}
+		seen[id] = struct{}{}
+	}
 }
 
 type fixedClock struct {

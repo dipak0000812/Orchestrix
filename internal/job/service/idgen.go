@@ -19,14 +19,16 @@ type IDGenerator interface {
 //   - 128-bit (collision-resistant like UUIDs)
 //   - Base32 encoded (URL-safe, case-insensitive)
 type ULIDGenerator struct {
-	entropy *ulid.MonotonicEntropy
+	entropy *ulid.LockedMonotonicReader
 }
 
 // NewULIDGenerator creates a new ULID generator with monotonic entropy.
 // Monotonic ensures IDs generated in same millisecond are still ordered.
 func NewULIDGenerator() *ULIDGenerator {
 	// Use crypto/rand for secure randomness
-	entropy := ulid.Monotonic(rand.Reader, 0)
+	entropy := &ulid.LockedMonotonicReader{
+		MonotonicReader: ulid.Monotonic(rand.Reader, 0),
+	}
 
 	return &ULIDGenerator{
 		entropy: entropy,

@@ -154,7 +154,13 @@ The repository contains Go benchmark functions and an opt-in scheduler sweep, bu
 RUN_THROUGHPUT_REVIEW=1 go test ./internal/worker/... -run '^TestThroughputDesignReview$' -v -timeout 30m
 ```
 
-The worker and repository integration/benchmark helpers delete rows from the `jobs` table. Use only a disposable test database. No raw k6 summary is checked in. Also, the current k6 script sends no API key, while the API requires Bearer authentication; its requests will be rejected until the script is updated.
+The worker and repository integration/benchmark helpers delete rows from the `jobs` table. Use only a disposable test database. The k6 script requires an API key and sends it to each API endpoint. A local k6 summary and its run metadata are checked in under `k6-summary.json` and `docs/benchmarks/`. Set `ORCHESTRIX_API_KEY` to a key for the test server, then run:
+
+```bash
+k6 run -e API_KEY="$ORCHESTRIX_API_KEY" -e MAX_VUS=100 -e RAMP_DURATION=15s -e HOLD_DURATION=45s --summary-export=k6-summary.json loadtest/api_load_test.js
+```
+
+Keep the generated summary with the run's commit, server/database configuration, and machine details. Do not commit the API key.
 
 ---
 
