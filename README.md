@@ -146,21 +146,34 @@ WAITING ──(all parents succeed)──► PENDING ──► SCHEDULED ──�
 
 ## Performance and Benchmarks
 
-The repository contains Go benchmark functions and an opt-in scheduler sweep, but it does not include their raw run output or enough environment metadata to reproduce historical numbers. This README therefore makes no latency or throughput claims.
+The following are single local measurements, not maximum-capacity or production claims. Test setup, host details, raw output, and limitations are recorded with each result.
 
-`internal/job/repository/postgres_bench_test.go` benchmarks database operations. `internal/worker/throughput_bench_test.go` defines 17 scheduler configurations and seeds 500 ordinary jobs plus 10 retry-check jobs per configuration. It is not the 1-million-row query fixture described in a source comment. The throughput test uses Linux `/proc` counters and is skipped unless explicitly enabled:
+| Workload | Configuration | Measured result |
+| :--- | :--- | :--- |
+| API load ([k6 report](docs/benchmarks/k6-local-2026-10-02.md)) | 100 VUs; 15s ramp, 45s hold, 15s ramp-down | 10,936 successful creates; 145.29 creates/sec; 320.24 HTTP requests/sec; create p95 41.39 ms; 0 failed requests |
+| Scheduler drain ([report](docs/benchmarks/concurrent-scheduler-2026-10-02.md)) | 2 adaptive schedulers, 5 workers, batch 50; 1,000 checksum jobs and 10 failing retry jobs | 1,010 terminal jobs in 23.05s; 43.82 jobs/sec effective drain rate; claim p50/p95 54.06/147.01 ms; 0 duplicate executions; retries exhausted as expected |
+
+These results came from different workloads and should not be compared as competing throughput measurements. The scheduler rate includes retry backoff time. The API run measures a single host and does not establish a saturation point. The raw k6 output is in [k6-summary.json](k6-summary.json).
+
+`internal/job/repository/postgres_bench_test.go` benchmarks database operations. `internal/worker/throughput_bench_test.go` also defines a 17-configuration scheduler sweep, seeding 500 ordinary jobs plus 10 retry-check jobs per configuration. It is not the 1-million-row query fixture described in a source comment. The full sweep uses Linux `/proc` counters and is skipped unless explicitly enabled:
 
 ```bash
 RUN_THROUGHPUT_REVIEW=1 go test ./internal/worker/... -run '^TestThroughputDesignReview$' -v -timeout 30m
 ```
 
-The worker and repository integration/benchmark helpers delete rows from the `jobs` table. Use only a disposable test database. The k6 script requires an API key and sends it to each API endpoint. A local k6 summary and its run metadata are checked in under `k6-summary.json` and `docs/benchmarks/`. Set `ORCHESTRIX_API_KEY` to a key for the test server, then run:
+The focused two-scheduler drain measurement can be repeated with:
+
+```bash
+RUN_CONCURRENT_SCHEDULER_BENCHMARK=1 go test ./internal/worker/... -run '^TestConcurrentSchedulerDrain$' -count=1 -v -timeout 3m
+```
+
+The worker and repository integration/benchmark helpers delete rows from the `jobs` table. Use only a disposable test database. The k6 script requires an API key and sends it to each API endpoint. Set `ORCHESTRIX_API_KEY` to a key for the test server, then run:
 
 ```bash
 k6 run -e API_KEY="$ORCHESTRIX_API_KEY" -e MAX_VUS=100 -e RAMP_DURATION=15s -e HOLD_DURATION=45s --summary-export=k6-summary.json loadtest/api_load_test.js
 ```
 
-Keep the generated summary with the run's commit, server/database configuration, and machine details. Do not commit the API key.
+Keep generated summaries with the run's commit, server/database configuration, and machine details. Do not commit API keys.
 
 ---
 

@@ -355,6 +355,131 @@ func TestThroughputDesignReview(t *testing.T) {
 	}
 }
 
+func TestConcurrentSchedulerDrain(t *testing.T) {
+	if os.Getenv("RUN_CONCURRENT_SCHEDULER_BENCHMARK") == "" {
+		t.Skip("set RUN_CONCURRENT_SCHEDULER_BENCHMARK=1 to run the concurrent scheduler drain benchmark")
+	}
+
+	const backlogSize = 1000
+	const failingJobCount = 10
+	const schedulerCount = 2
+	const batchSize = 50
+
+	repo := connectStressTestDB(t)
+	ctx := context.Background()
+	runNonce := time.Now().UnixNano()
+	for i := 0; i < backlogSize; i++ {
+		marker := fmt.Sprintf("concurrent_%d_%d", runNonce, i)
+		payload, _ := json.Marshal(countingChecksumPayload{Data: "x", WorkFactor: 1, Marker: marker})
+		job := &model.Job{
+			ID: marker, Type: "counting_checksum", Payload: payload,
+			State: state.PENDING, Attempt: 1, MaxAttempts: 3, CreatedAt: time.Now(),
+		}
+		if err := repo.Create(ctx, job); err != nil {
+			t.Fatalf("seed job %d: %v", i, err)
+		}
+	}
+
+	failingIDs := make([]string, failingJobCount)
+	for i := range failingIDs {
+		id := fmt.Sprintf("concurrent_failing_%d_%d", runNonce, i)
+		failingIDs[i] = id
+		job := &model.Job{
+			ID: id, Type: "failing_job", Payload: []byte(`{}`),
+			State: state.PENDING, Attempt: 1, MaxAttempts: 3, CreatedAt: time.Now(),
+		}
+		if err := repo.Create(ctx, job); err != nil {
+			t.Fatalf("seed failing job %d: %v", i, err)
+		}
+	}
+
+	jobChannel := make(chan *model.Job, 1000)
+	executors := executor.NewExecutorRegistry()
+	counter := &countingExecutor{inner: executor.NewChecksumExecutor()}
+	executors.Register("counting_checksum", counter)
+	executors.Register("failing_job", executor.NewFailingExecutor())
+	jobService := service.NewJobService(
+		repo,
+		state.NewStateMachine(),
+		service.NewULIDGenerator(),
+		service.DefaultRetryConfig(),
+		dependency.NewResolver(repo),
+	)
+
+	var claimMu sync.Mutex
+	var claimDurations []time.Duration
+	schedulers := make([]*scheduler.Scheduler, schedulerCount)
+	for i := range schedulers {
+		schedulers[i] = scheduler.NewScheduler(repo, time.Second, batchSize, jobChannel)
+		schedulers[i].EnableAdaptivePolling()
+		schedulers[i].SetClaimObserver(func(event scheduler.ClaimEvent) {
+			claimMu.Lock()
+			claimDurations = append(claimDurations, event.Duration)
+			claimMu.Unlock()
+		})
+	}
+	workers := NewWorkerPool(5, jobChannel, executors, jobService, metrics.NewMetrics(), 10*time.Second)
+
+	for _, sched := range schedulers {
+		sched.Start()
+	}
+	workers.Start()
+	drainStart := time.Now()
+	total := backlogSize + failingJobCount
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		succeeded, _ := repo.CountByState(ctx, state.SUCCEEDED)
+		failed, _ := repo.CountByState(ctx, state.FAILED)
+		if succeeded+failed >= total {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	drainDuration := time.Since(drainStart)
+	for _, sched := range schedulers {
+		sched.Stop()
+	}
+	workers.Stop()
+
+	succeeded, err := repo.CountByState(ctx, state.SUCCEEDED)
+	if err != nil {
+		t.Fatalf("count succeeded jobs: %v", err)
+	}
+	failed, err := repo.CountByState(ctx, state.FAILED)
+	if err != nil {
+		t.Fatalf("count failed jobs: %v", err)
+	}
+	if succeeded != backlogSize || failed != failingJobCount {
+		t.Fatalf("terminal counts: succeeded=%d failed=%d, want succeeded=%d failed=%d", succeeded, failed, backlogSize, failingJobCount)
+	}
+
+	retryOK := true
+	for _, id := range failingIDs {
+		job, err := repo.GetByID(ctx, id)
+		if err != nil || job.State != state.FAILED || job.Attempt != job.MaxAttempts {
+			retryOK = false
+			break
+		}
+	}
+	claimMu.Lock()
+	sortedClaims := append([]time.Duration(nil), claimDurations...)
+	claimMu.Unlock()
+	sort.Slice(sortedClaims, func(i, j int) bool { return sortedClaims[i] < sortedClaims[j] })
+	claimP50 := percentile(sortedClaims, 0.50)
+	claimP95 := percentile(sortedClaims, 0.95)
+	duplicates := counter.duplicateCount()
+
+	t.Logf("MEASURED schedulers=%d workers=5 batch=%d adaptive=true jobs=%d duration=%v jobs/sec=%.2f claims=%d claim(p50/p95)=%v/%v duplicates=%d retryOK=%t",
+		schedulerCount, batchSize, total, drainDuration, float64(total)/drainDuration.Seconds(),
+		len(sortedClaims), claimP50, claimP95, duplicates, retryOK)
+	if duplicates != 0 {
+		t.Errorf("%d jobs executed more than once", duplicates)
+	}
+	if !retryOK {
+		t.Error("retry exhaustion check failed")
+	}
+}
+
 // TestIdlePollingCost measures the CPU cost of polling an empty queue --
 // the other half of the adaptive-polling evaluation. The backlog sweep in
 // TestThroughputDesignReview only measures drain throughput under load; it
