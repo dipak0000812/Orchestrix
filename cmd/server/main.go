@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	cryptorand "crypto/rand"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -91,7 +92,8 @@ func main() {
 	jobService := service.NewJobService(repo, stateMachine, idGen, retryConfig, resolver)
 
 	keyRepo := auth.NewKeyRepository(pool)
-	if err := bootstrapAPIKey(context.Background(), keyRepo); err != nil {
+	demoKey := getEnv("DEMO_API_KEY", "orx_demo_reviewer_2026")
+	if err := bootstrapAPIKey(context.Background(), keyRepo, demoKey); err != nil {
 		log.Fatalf("Failed to bootstrap API key: %v", err)
 	}
 
@@ -125,18 +127,38 @@ func main() {
 	workers.Start()
 	defer workers.Stop()
 
+	rateLimiter := api.NewRateLimiter(120, 30) // 120 req/min, burst 30 per IP/Key
+	defer rateLimiter.Stop()
+
 	handler := api.NewHandler(jobService, m)
+	handler.SetDemoKey(demoKey)
 
 	router := http.NewServeMux()
+	router.HandleFunc("GET /", handler.Root)
 	router.HandleFunc("POST /api/v1/jobs", handler.CreateJob)
 	router.HandleFunc("GET /api/v1/jobs/{id}", handler.GetJob)
 	router.HandleFunc("GET /api/v1/jobs", handler.ListJobs)
 	router.HandleFunc("DELETE /api/v1/jobs/{id}", handler.CancelJob)
 	router.HandleFunc("GET /health", handler.Health)
+	router.HandleFunc("GET /healthz", handler.Health)
 	router.Handle("GET /metrics", promhttp.Handler())
 
-	bodyLimited := api.MaxBodySizeMiddleware(maxRequestBodyBytes)(router)
-	authedRouter := auth.Middleware(keyRepo, map[string]bool{"/health": true})(bodyLimited)
+	exemptFromAuth := map[string]bool{
+		"/":        true,
+		"/health":  true,
+		"/healthz": true,
+		"/metrics": true,
+	}
+
+	exemptFromRateLimit := map[string]bool{
+		"/health":  true,
+		"/healthz": true,
+	}
+
+	authedRouter := auth.Middleware(keyRepo, exemptFromAuth)(router)
+	rateLimited := rateLimiter.Middleware(exemptFromRateLimit)(authedRouter)
+	bodyLimited := api.MaxBodySizeMiddleware(maxRequestBodyBytes)(rateLimited)
+
 	port := cfg.Server.Port
 	if envPort := os.Getenv("PORT"); envPort != "" {
 		if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
@@ -145,7 +167,7 @@ func main() {
 	}
 	server := &http.Server{
 		Addr:    ":" + strconv.Itoa(port),
-		Handler: authedRouter,
+		Handler: bodyLimited,
 	}
 
 	go func() {
@@ -198,35 +220,48 @@ func warnIfInsecureDBConfig(host, sslMode, password string) {
 	}
 }
 
-func bootstrapAPIKey(ctx context.Context, keyRepo *auth.KeyRepository) error {
-	count, err := keyRepo.Count(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to check existing api keys: %w", err)
-	}
-	if count > 0 {
-		return nil
-	}
-
+func bootstrapAPIKey(ctx context.Context, keyRepo *auth.KeyRepository, demoKey string) error {
+	// 1. Register admin key if ADMIN_API_KEY is supplied
 	if adminKey := os.Getenv("ADMIN_API_KEY"); adminKey != "" {
-		id := ulid.MustNew(ulid.Timestamp(time.Now()), ulid.Monotonic(cryptorand.Reader, 0)).String()
-		if err := keyRepo.Create(ctx, id, auth.HashKey(adminKey), "admin-bootstrap (from ADMIN_API_KEY)"); err != nil {
-			return err
+		if _, err := keyRepo.LookupByHash(ctx, auth.HashKey(adminKey)); errors.Is(err, auth.ErrKeyNotFound) {
+			id := ulid.MustNew(ulid.Timestamp(time.Now()), ulid.Monotonic(cryptorand.Reader, 0)).String()
+			if err := keyRepo.Create(ctx, id, auth.HashKey(adminKey), "admin-bootstrap (from ADMIN_API_KEY)"); err != nil {
+				return err
+			}
+			log.Println("Registered API key from ADMIN_API_KEY environment variable")
 		}
-		log.Println("Registered API key from ADMIN_API_KEY environment variable")
-		return nil
+	} else {
+		// If no keys exist at all, generate an initial admin key
+		count, err := keyRepo.Count(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to check existing api keys: %w", err)
+		}
+		if count == 0 {
+			generated, err := auth.GenerateAPIKey()
+			if err != nil {
+				return fmt.Errorf("failed to generate bootstrap api key: %w", err)
+			}
+			if err := keyRepo.Create(ctx, generated.ID, generated.Hash, "admin-bootstrap (generated)"); err != nil {
+				return err
+			}
+			log.Println("=======================================================================")
+			log.Println("Generated initial API key:")
+			log.Printf("  %s", generated.Plaintext)
+			log.Println("Pass this key as: Authorization: Bearer <key>")
+			log.Println("=======================================================================")
+		}
 	}
 
-	generated, err := auth.GenerateAPIKey()
-	if err != nil {
-		return fmt.Errorf("failed to generate bootstrap api key: %w", err)
+	// 2. Always ensure the public demo key exists so reviewers can test immediately
+	if demoKey != "" {
+		if _, err := keyRepo.LookupByHash(ctx, auth.HashKey(demoKey)); errors.Is(err, auth.ErrKeyNotFound) {
+			id := ulid.MustNew(ulid.Timestamp(time.Now()), ulid.Monotonic(cryptorand.Reader, 0)).String()
+			if err := keyRepo.Create(ctx, id, auth.HashKey(demoKey), "demo-reviewer"); err != nil {
+				return fmt.Errorf("failed to register demo key: %w", err)
+			}
+			log.Printf("Registered public demo API key: %s (name: demo-reviewer)", demoKey)
+		}
 	}
-	if err := keyRepo.Create(ctx, generated.ID, generated.Hash, "admin-bootstrap (generated)"); err != nil {
-		return err
-	}
-	log.Println("=======================================================================")
-	log.Println("Generated initial API key:")
-	log.Printf("  %s", generated.Plaintext)
-	log.Println("Pass this key as: Authorization: Bearer <key>")
-	log.Println("=======================================================================")
+
 	return nil
 }

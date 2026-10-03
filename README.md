@@ -19,6 +19,32 @@ A PostgreSQL-backed asynchronous job orchestration service in Go. Orchestrix pro
 
 ---
 
+## Live Deployment & Reviewer Demo
+
+- **Live Service**: [https://orchestrix-3dp3.onrender.com](https://orchestrix-3dp3.onrender.com)
+- **Health Check**: [https://orchestrix-3dp3.onrender.com/healthz](https://orchestrix-3dp3.onrender.com/healthz) (Public, no auth)
+- **Telemetry**: [https://orchestrix-3dp3.onrender.com/metrics](https://orchestrix-3dp3.onrender.com/metrics)
+- **Reviewer Demo API Key**: `orx_demo_reviewer_2026`
+
+Test immediately from terminal:
+```bash
+# Liveness probe
+curl https://orchestrix-3dp3.onrender.com/healthz
+
+# Submit a job using the reviewer demo key
+curl -X POST https://orchestrix-3dp3.onrender.com/api/v1/jobs \
+  -H "Authorization: Bearer orx_demo_reviewer_2026" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"compute_checksum","payload":{"data":"reviewer-test","work_factor":1}}'
+
+# Check status
+curl https://orchestrix-3dp3.onrender.com/api/v1/jobs/<JOB_ID> \
+  -H "Authorization: Bearer orx_demo_reviewer_2026"
+```
+*Reviewer demo keys are tenant-isolated, rate-limited (120 req/min), and restricted from dispatching outbound webhooks.*
+
+---
+
 ## Quick Start
 
 ### Prerequisites
@@ -184,6 +210,7 @@ Keep generated summaries with the run's commit, server/database configuration, a
 | **Authentication** | Bearer API Keys stored as SHA-256 hashes. Verified via constant-time comparison. |
 | **Tenant Isolation** | Public API job lookups and lists are scoped by `owner_key_id`. Cross-tenant lookups return uniform `404 Not Found`. |
 | **SSRF Prevention** | Custom `http.Transport` validating resolved IPs at dial time (blocks loopback, RFC 1918, link-local, multicast). |
+| **Rate Limiting** | Token-bucket rate limiter (120 req/min, burst 30) per API key / IP address. Public health exempt. |
 | **DoS Defenses** | Request body capped at 1 MiB (`MaxBytesReader`), `?limit=` capped at 500, CPU `work_factor` capped at 100,000. |
 | **Error Masking** | Internal SQL and driver error details logged server-side only; callers receive safe generic messages. |
 

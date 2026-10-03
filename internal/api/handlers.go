@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dipak0000812/orchestrix/internal/auth"
@@ -17,6 +18,7 @@ import (
 type Handler struct {
 	jobService *service.JobService
 	metrics    *metrics.Metrics
+	demoKey    string
 }
 
 // NewHandler creates a new API handler.
@@ -25,6 +27,11 @@ func NewHandler(jobService *service.JobService, m *metrics.Metrics) *Handler {
 		jobService: jobService,
 		metrics:    m,
 	}
+}
+
+// SetDemoKey configures the public demo API key for documentation and landing page.
+func (h *Handler) SetDemoKey(key string) {
+	h.demoKey = key
 }
 
 func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
@@ -49,6 +56,12 @@ func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
 	if req.Type == "" {
 		h.metrics.HTTPRequests.WithLabelValues("POST", "/api/v1/jobs", "400").Inc()
 		respondError(w, http.StatusBadRequest, "job type is required")
+		return
+	}
+
+	if auth.IsDemoKey(r.Context()) && req.Type == "http_webhook" {
+		h.metrics.HTTPRequests.WithLabelValues("POST", "/api/v1/jobs", "403").Inc()
+		respondError(w, http.StatusForbidden, "demo API key is restricted from creating http_webhook jobs (demo access policy)")
 		return
 	}
 
@@ -171,6 +184,46 @@ func (h *Handler) CancelJob(w http.ResponseWriter, r *http.Request) {
 
 	h.metrics.JobsCancelled.Inc()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) Root(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		respondError(w, http.StatusNotFound, "route not found")
+		return
+	}
+
+	demoKey := h.demoKey
+	if demoKey == "" {
+		demoKey = "orx_demo_reviewer_2026"
+	}
+
+	if strings.Contains(r.Header.Get("Accept"), "text/html") {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(renderLandingHTML(demoKey)))
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"service":     "Orchestrix",
+		"version":     "1.0",
+		"status":      "healthy",
+		"description": "PostgreSQL-backed asynchronous job orchestration service in Go",
+		"docs":        "https://github.com/dipak0000812/Orchestrix",
+		"auth": map[string]string{
+			"type":     "Bearer <api-key>",
+			"demo_key": demoKey,
+			"note":     "Use demo key in 'Authorization: Bearer <key>' header. Demo keys are restricted from creating http_webhook jobs.",
+		},
+		"endpoints": map[string]string{
+			"root":       "GET /",
+			"health":     "GET /healthz",
+			"metrics":    "GET /metrics",
+			"create_job": "POST /api/v1/jobs",
+			"get_job":    "GET /api/v1/jobs/{id}",
+			"list_jobs":  "GET /api/v1/jobs?state=SUCCEEDED",
+		},
+	})
 }
 
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {

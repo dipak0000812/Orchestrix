@@ -11,7 +11,10 @@ type contextKey string
 // callerKeyIDContextKey stores the authenticated caller's API key ID on
 // the request context, set by Middleware and read by handlers that need
 // to scope data to the caller (job ownership checks).
-const callerKeyIDContextKey contextKey = "auth.caller_key_id"
+const (
+	callerKeyIDContextKey   contextKey = "auth.caller_key_id"
+	callerKeyNameContextKey contextKey = "auth.caller_key_name"
+)
 
 // Middleware enforces bearer API-key authentication on every request
 // except the given exempt paths (typically just "/health", since
@@ -50,6 +53,7 @@ func Middleware(keyRepo *KeyRepository, exemptPaths map[string]bool) func(http.H
 			}
 
 			ctx := context.WithValue(r.Context(), callerKeyIDContextKey, rec.ID)
+			ctx = context.WithValue(ctx, callerKeyNameContextKey, rec.Name)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -63,6 +67,18 @@ func Middleware(keyRepo *KeyRepository, exemptPaths map[string]bool) func(http.H
 func CallerKeyID(ctx context.Context) (string, bool) {
 	v, ok := ctx.Value(callerKeyIDContextKey).(string)
 	return v, ok
+}
+
+// CallerKeyName returns the name associated with the authenticated caller's API key.
+func CallerKeyName(ctx context.Context) (string, bool) {
+	v, ok := ctx.Value(callerKeyNameContextKey).(string)
+	return v, ok
+}
+
+// IsDemoKey checks if the caller is using an API key flagged as a demo key.
+func IsDemoKey(ctx context.Context) bool {
+	name, ok := CallerKeyName(ctx)
+	return ok && strings.HasPrefix(name, "demo")
 }
 
 func respondUnauthorized(w http.ResponseWriter, message string) {
