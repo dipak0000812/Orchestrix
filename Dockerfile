@@ -28,14 +28,21 @@ RUN addgroup -S orchestrix && adduser -S orchestrix -G orchestrix
 
 WORKDIR /app
 
-# Copy the application and its required runtime configuration.
+# Copy migrate binary for automatic startup migrations
+COPY --from=migrate/migrate:v4.19.1 /usr/local/bin/migrate /usr/local/bin/migrate
+
+# Copy the application, migrations, and configurations
 COPY --from=builder --chown=orchestrix:orchestrix /app/orchestrix ./orchestrix
 COPY --from=builder --chown=orchestrix:orchestrix /app/configs ./configs
+COPY --chown=orchestrix:orchestrix ./migrations ./migrations
+COPY --chown=orchestrix:orchestrix ./docker-entrypoint.sh ./docker-entrypoint.sh
+RUN chmod +x ./docker-entrypoint.sh
 
 # Expose port
 EXPOSE 8080
 
 USER orchestrix
 
-# Run
+# Entrypoint applies any pending migrations then starts the service
+ENTRYPOINT ["./docker-entrypoint.sh"]
 CMD ["./orchestrix"]

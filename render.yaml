@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: orchestrix
+    runtime: docker
+    plan: free # Free tier: spins down after ~15 min idle; background workers pause while asleep
+    region: oregon
+    healthCheckPath: /health
+    dockerfilePath: Dockerfile
+    dockerContext: .
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: orchestrix-postgres
+          property: connectionString
+      - key: ADMIN_API_KEY
+        generateValue: true
+      - key: CONFIG_PATH
+        value: /app/configs/base.yaml
+      - key: RUN_MIGRATIONS
+        value: "true"
+
+databases:
+  - name: orchestrix-postgres
+    databaseName: orchestrix
+    user: orchestrix
+    plan: free # Free tier: one per account, expires 30 days after creation
+    region: oregon

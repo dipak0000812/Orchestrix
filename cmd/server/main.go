@@ -42,25 +42,38 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	dbHost := getEnv("DB_HOST", "localhost")
-	dbPassword := os.Getenv("DB_PASSWORD")
-	if dbPassword == "" {
-		log.Fatal("DB_PASSWORD environment variable is required")
-	}
-	dbSSLMode := getEnv("DB_SSLMODE", "disable")
-	warnIfInsecureDBConfig(dbHost, dbSSLMode, dbPassword)
+	databaseURL := os.Getenv("DATABASE_URL")
+	var dbConfig repository.DBConfig
 
-	dbConfig := repository.DBConfig{
-		Host:            dbHost,
-		Port:            getEnvInt("DB_PORT", 5434),
-		User:            getEnv("DB_USER", "orchestrix"),
-		Password:        dbPassword,
-		Database:        getEnv("DB_NAME", "orchestrix_dev"),
-		SSLMode:         dbSSLMode,
-		MaxConnections:  20,
-		MinConnections:  2,
-		MaxConnLifetime: 30 * time.Minute,
-		MaxConnIdleTime: 5 * time.Minute,
+	if databaseURL != "" {
+		dbConfig = repository.DBConfig{
+			DatabaseURL:     databaseURL,
+			MaxConnections:  20,
+			MinConnections:  2,
+			MaxConnLifetime: 30 * time.Minute,
+			MaxConnIdleTime: 5 * time.Minute,
+		}
+	} else {
+		dbHost := getEnv("DB_HOST", "localhost")
+		dbPassword := os.Getenv("DB_PASSWORD")
+		if dbPassword == "" {
+			log.Fatal("DB_PASSWORD or DATABASE_URL environment variable is required")
+		}
+		dbSSLMode := getEnv("DB_SSLMODE", "disable")
+		warnIfInsecureDBConfig(dbHost, dbSSLMode, dbPassword)
+
+		dbConfig = repository.DBConfig{
+			Host:            dbHost,
+			Port:            getEnvInt("DB_PORT", 5434),
+			User:            getEnv("DB_USER", "orchestrix"),
+			Password:        dbPassword,
+			Database:        getEnv("DB_NAME", "orchestrix_dev"),
+			SSLMode:         dbSSLMode,
+			MaxConnections:  20,
+			MinConnections:  2,
+			MaxConnLifetime: 30 * time.Minute,
+			MaxConnIdleTime: 5 * time.Minute,
+		}
 	}
 
 	pool, err := repository.NewConnectionPool(context.Background(), dbConfig)
@@ -124,8 +137,14 @@ func main() {
 
 	bodyLimited := api.MaxBodySizeMiddleware(maxRequestBodyBytes)(router)
 	authedRouter := auth.Middleware(keyRepo, map[string]bool{"/health": true})(bodyLimited)
+	port := cfg.Server.Port
+	if envPort := os.Getenv("PORT"); envPort != "" {
+		if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
+			port = p
+		}
+	}
 	server := &http.Server{
-		Addr:    ":" + strconv.Itoa(cfg.Server.Port),
+		Addr:    ":" + strconv.Itoa(port),
 		Handler: authedRouter,
 	}
 

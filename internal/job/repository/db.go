@@ -10,6 +10,7 @@ import (
 
 // DBConfig holds database connection configuration.
 type DBConfig struct {
+	DatabaseURL     string
 	Host            string
 	Port            int
 	User            string
@@ -25,15 +26,20 @@ type DBConfig struct {
 // NewConnectionPool creates a new PostgreSQL connection pool.
 func NewConnectionPool(ctx context.Context, cfg DBConfig) (*pgxpool.Pool, error) {
 	// Build connection string
-	dsn := fmt.Sprintf(
-		"postgres://%s:%s@%s:%d/%s?sslmode=%s",
-		cfg.User,
-		cfg.Password,
-		cfg.Host,
-		cfg.Port,
-		cfg.Database,
-		cfg.SSLMode,
-	)
+	var dsn string
+	if cfg.DatabaseURL != "" {
+		dsn = cfg.DatabaseURL
+	} else {
+		dsn = fmt.Sprintf(
+			"postgres://%s:%s@%s:%d/%s?sslmode=%s",
+			cfg.User,
+			cfg.Password,
+			cfg.Host,
+			cfg.Port,
+			cfg.Database,
+			cfg.SSLMode,
+		)
+	}
 
 	// Parse connection string and configure pool
 	config, err := pgxpool.ParseConfig(dsn)
