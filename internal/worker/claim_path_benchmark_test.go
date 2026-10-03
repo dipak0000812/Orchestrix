@@ -114,7 +114,7 @@ func TestClaimPathSingleSchedulerDrain(t *testing.T) {
 
 	jobChannel := make(chan *model.Job, 500)
 	executors := executor.NewExecutorRegistry()
-	executors.Register("compute_checksum", executor.NewChecksumExecutor())
+	executors.Register("compute_checksum", executor.NewDemoExecutor(0))
 	jobService := service.NewJobService(
 		repo,
 		state.NewStateMachine(),
